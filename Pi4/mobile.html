@@ -41,6 +41,11 @@ header{padding:12px 14px 10px;background:#0e0e1a;border-bottom:1px solid #181828
 
 /* toggle row */
 .tog-row{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#b0b0d0}
+
+/* speed slider */
+.spd-row{display:flex;align-items:center;gap:10px;margin-top:2px}
+.spd-slider{flex:1;accent-color:#7c5cfc;cursor:pointer;height:4px}
+.spd-val{font-size:12px;color:#d0d0f0;min-width:62px;text-align:right;white-space:nowrap}
 .tog{position:relative;width:34px;height:19px;border-radius:10px;cursor:pointer;
   background:#22223a;transition:background .15s;flex-shrink:0}
 .tog.on{background:#7c5cfc}
@@ -113,6 +118,14 @@ footer{padding:8px 14px;background:#0e0e1a;border-top:1px solid #181828;
     <div class="tog-row">
       <span>Loop</span>
       <div class="tog on" id="tog-loop" onclick="toggleLoop()"></div>
+    </div>
+    <div>
+      <div class="card-label" style="margin-bottom:6px">Speed</div>
+      <div class="spd-row">
+        <input type="range" class="spd-slider" id="spd-slider"
+          min="50" max="3000" step="50" value="2000">
+        <span class="spd-val" id="spd-val">2000 sps</span>
+      </div>
     </div>
     <div id="run-err" style="display:none" class="err"></div>
   </div>
@@ -285,6 +298,18 @@ function toggleLoop() {
   loopMode = !loopMode;
   document.getElementById("tog-loop").classList.toggle("on", loopMode);
 }
+
+// ── Speed slider ──────────────────────────────────────────────────────────
+let spdTimer = null;
+document.getElementById("spd-slider").addEventListener("input", e => {
+  const v = e.target.value;
+  document.getElementById("spd-val").textContent = `${v} sps`;
+  clearTimeout(spdTimer);
+  spdTimer = setTimeout(() => {
+    fetch(`${BASE}/api/cmd?c=${encodeURIComponent(`speed ${v}`)}`,
+      {signal: AbortSignal.timeout(3000)}).catch(() => {});
+  }, 150);
+});
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 function setDot(id, state) {

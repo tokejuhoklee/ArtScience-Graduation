@@ -22,7 +22,8 @@ function expandBlock(blk, G, pos0) {
   const spd  = blk.speed  ?? G.speed;
   const ang  = (blk.angle  ?? G.angle)  * (G.angleMult ?? 1);
   const rest = (blk.restMs ?? G.restMs) * (G.restMult  ?? 1);
-  const brk  = G.brk, soft = G.soft;
+  const brk  = blk.brk  ?? G.brk;
+  const soft = blk.soft ?? G.soft;
   const id   = blk.id;
   const ev   = [];
   let t = 0, pos = pos0;
@@ -64,33 +65,38 @@ function expandBlock(blk, G, pos0) {
       }
     }
   } else if (blk.type === "wave") {
+    // Relative oscillation (offset-based) so it works from any arm position.
+    // Pattern: each half-swing accounts for where the previous one ended.
+    // After rep[i]: arm is at pos0 - inv*ga[i]. Rep[i+1] goes pos0 ± ga[i+1].
+    const sAng = Math.max(5, Math.round(ang * 0.25));
+    const sRest = Math.round(rest * 0.3);
+    const smallReps = Math.max(2, Math.round(blk.reps * 0.5));
+    const waveSwing = (a, s, r, prevA) => {
+      moveAt(pos + inv * (a + prevA), s); wait(r);
+      moveAt(pos - inv * 2 * a,       s); wait(r);
+    };
     if (blk.constant) {
+      let prevA = 0;
+      for (let i = 0; i < smallReps; i++) { waveSwing(sAng, spd, sRest, prevA); prevA = sAng; }
       for (let i = 0; i < blk.reps; i++) {
-        const si = spdAt(i);
-        moveAt( inv * ang, si); wait(rest);
-        moveAt(-inv * ang, si); wait(rest);
+        const ga = Math.round(sAng + (ang-sAng)*(i+1)/blk.reps);
+        waveSwing(ga, spd, rest, prevA); prevA = ga;
       }
     } else {
-      const sAng = Math.max(5, Math.round(ang * 0.25));
       const sSpd = Math.round(spd * 0.3);
-      const sRest = Math.round(rest * 0.3);
-      const smallReps = Math.max(2, Math.round(blk.reps * 0.5));
-      for (let i = 0; i < smallReps; i++) {
-        moveAt( inv * sAng, sSpd); wait(sRest);
-        moveAt(-inv * sAng, sSpd); wait(sRest);
-      }
+      let prevA = 0;
+      for (let i = 0; i < smallReps; i++) { waveSwing(sAng, sSpd, sRest, prevA); prevA = sAng; }
       for (let i = 0; i < blk.reps; i++) {
         const frac = (i+1)/blk.reps;
         const ga = Math.round(sAng + (ang-sAng)*frac);
         const gs = Math.round(sSpd + (spd-sSpd)*frac);
-        moveAt( inv * ga, gs); wait(rest);
-        moveAt(-inv * ga, gs); wait(rest);
+        waveSwing(ga, gs, rest, prevA); prevA = ga;
       }
     }
 
   } else if (blk.type === "spin") {
     const revs = blk.continuous ? 10 : (blk.revs ?? 2);
-    const dirs = blk.dir === "both" ? [1, -1] : [blk.dir ?? 1];
+    const dirs = blk.dir === "both" ? [inv, -inv] : [inv * (blk.dir ?? 1)];
     for (const dir of dirs) {
       const deg = revs * 360;
       const dt  = moveTime(deg, spd, false, false);
@@ -100,14 +106,23 @@ function expandBlock(blk, G, pos0) {
     }
 
   } else if (blk.type === "buildup") {
+    // Relative oscillation — oscillates around current position with growing amplitude
+    let prevA = 0;
     for (let i = 0; i < blk.reps; i++) {
       const frac = (i+1)/blk.reps;
       const a = Math.max(5, Math.round(ang * frac));
       const s = Math.round(spd * (0.35 + 0.65*frac));
       const r = Math.round(rest * (1.6 - 0.9*frac));
-      moveAt( inv * a, s); wait(r);
-      moveAt(-inv * a, s); wait(r);
+      moveAt(pos + inv * (a + prevA), s); wait(r);
+      moveAt(pos - inv * 2 * a,       s); wait(r);
+      prevA = a;
     }
+
+  } else if (blk.type === "swing") {
+    // Single directional move — transition block
+    const dir = blk.dir ?? 1;
+    moveAt(pos + inv * dir * ang, spd);
+    wait(rest);
 
   } else if (blk.type === "pause") {
     wait(blk.ms ?? 1000);
@@ -124,8 +139,6 @@ function compileToSteps(blocks, G) {
   const out = [
     ["stop"],
     ["on"],
-    G.brk  ? ["brakeon"]    : ["brakeoff"],
-    G.soft ? ["softstarton"] : ["softstartoff"],
     ["loop_start"],  // server restarts from here on subsequent loop iterations
   ];
 
@@ -136,6 +149,12 @@ function compileToSteps(blocks, G) {
 
     // inv=-1 when exactly one of (global invert, block invert) is true — XOR
     const inv = ((G.invert ?? false) !== (blk.invert ?? false)) ? -1 : 1;
+
+    // Per-block braking/soft-start (falls back to global)
+    const effBrk  = blk.brk  ?? G.brk;
+    const effSoft = blk.soft ?? G.soft;
+    out.push(effBrk  ? ["brakeon"]     : ["brakeoff"]);
+    out.push(effSoft ? ["softstarton"] : ["softstartoff"]);
 
     if (blk.type === "pendulum") {
       const angSteps = Math.round((ang * GR / 360) * PPR);
@@ -166,39 +185,38 @@ function compileToSteps(blocks, G) {
         }
       }
     } else if (blk.type === "wave") {
-      const angSteps = Math.round((ang * GR / 360) * PPR);
+      // Offset-based (relative) so it works from any arm position.
+      // prevSteps tracks where the arm ended last half-swing so the next
+      // half-swing can reach the correct peak: offset +(next+prev) / -(2*next).
+      const sAng      = Math.max(5, Math.round(ang * 0.25));
+      const sRest     = Math.round(rest * 0.3);
+      const smallReps = Math.max(2, Math.round(blk.reps * 0.5));
+      const sAngSteps = Math.round((sAng * GR / 360) * PPR);
+      const pushSwing = (steps, spd_, rest_) => {
+        out.push(["offset",  inv * (steps + prevSteps)], ["wait_pend"]);
+        if (rest_ > 0) out.push(["wait", rest_]);
+        out.push(["offset", -inv * 2 * steps], ["wait_pend"]);
+        if (rest_ > 0) out.push(["wait", rest_]);
+        prevSteps = steps;
+      };
+      let prevSteps = 0;
       if (blk.constant) {
         out.push(["speed", spd]);
+        for (let i = 0; i < smallReps; i++) pushSwing(sAngSteps, spd, sRest);
         for (let i = 0; i < blk.reps; i++) {
-          out.push(["move",  inv * angSteps], ["wait_pend"]);
-          if (rest > 0) out.push(["wait", rest]);
-          out.push(["move", -inv * angSteps], ["wait_pend"]);
-          if (rest > 0) out.push(["wait", rest]);
+          const gaSteps = Math.round((Math.round(sAng + (ang-sAng)*(i+1)/blk.reps) * GR / 360) * PPR);
+          pushSwing(gaSteps, spd, rest);
         }
       } else {
-        const sAng  = Math.max(5, Math.round(ang * 0.25));
-        const sSpd  = Math.round(spd * 0.3);
-        const sRest = Math.round(rest * 0.3);
-        const smallReps = Math.max(2, Math.round(blk.reps * 0.5));
-        const sAngSteps = Math.round((sAng * GR / 360) * PPR);
-
+        const sSpd = Math.round(spd * 0.3);
         out.push(["speed", sSpd]);
-        for (let i = 0; i < smallReps; i++) {
-          out.push(["move",  inv * sAngSteps], ["wait_pend"]);
-          if (sRest > 0) out.push(["wait", sRest]);
-          out.push(["move", -inv * sAngSteps], ["wait_pend"]);
-          if (sRest > 0) out.push(["wait", sRest]);
-        }
+        for (let i = 0; i < smallReps; i++) pushSwing(sAngSteps, sSpd, sRest);
         for (let i = 0; i < blk.reps; i++) {
-          const frac = (i+1) / blk.reps;
-          const ga = Math.round(sAng + (ang - sAng) * frac);
-          const gs = Math.round(sSpd + (spd - sSpd) * frac);
-          const gaSteps = Math.round((ga * GR / 360) * PPR);
+          const frac    = (i+1) / blk.reps;
+          const gaSteps = Math.round((Math.round(sAng + (ang-sAng)*frac) * GR / 360) * PPR);
+          const gs      = Math.round(sSpd + (spd-sSpd)*frac);
           out.push(["speed", gs]);
-          out.push(["move",  inv * gaSteps], ["wait_pend"]);
-          if (rest > 0) out.push(["wait", rest]);
-          out.push(["move", -inv * gaSteps], ["wait_pend"]);
-          if (rest > 0) out.push(["wait", rest]);
+          pushSwing(gaSteps, gs, rest);
         }
         out.push(["speed", spd]);
       }
@@ -206,42 +224,52 @@ function compileToSteps(blocks, G) {
     } else if (blk.type === "spin") {
       out.push(["speed", spd]);
       if (blk.continuous) {
-        // For "both": spin CW briefly then CCW — use a fixed-rev offset instead
-        // of back-to-back cw/ccw (which would switch instantly with no wait)
         if (blk.dir === "both") {
-          const halfSteps = Math.round((2 * 360 * GR / 360) * PPR); // 2 revs each way
-          out.push(["offset",  halfSteps], ["wait_pend"]);
+          const halfSteps = Math.round((2 * 360 * GR / 360) * PPR);
+          out.push(["offset",  inv * halfSteps], ["wait_pend"]);
           if (rest > 0) out.push(["wait", rest]);
-          out.push(["offset", -halfSteps], ["wait_pend"]);
+          out.push(["offset", -inv * halfSteps], ["wait_pend"]);
           if (rest > 0) out.push(["wait", rest]);
         } else {
-          out.push([blk.dir > 0 ? "cw" : "ccw"]);
+          // inv flips CW↔CCW
+          const effDir = inv * (blk.dir ?? 1);
+          out.push([effDir > 0 ? "cw" : "ccw"]);
         }
       } else {
         const revs = blk.revs ?? 2;
-        const dirs = blk.dir === "both" ? [1,-1] : [blk.dir ?? 1];
+        const dirs = blk.dir === "both" ? [inv, -inv] : [inv * (blk.dir ?? 1)];
         for (const dir of dirs) {
           const totalSteps = Math.round((revs * 360 * GR / 360) * PPR);
-          out.push(["offset", dir * totalSteps]);
-          out.push(["wait_pend"]);
+          out.push(["offset", dir * totalSteps], ["wait_pend"]);
           if (rest > 0) out.push(["wait", rest]);
         }
       }
 
     } else if (blk.type === "buildup") {
+      // Offset-based — oscillates around current position with growing amplitude
+      let prevSteps = 0;
       for (let i = 0; i < blk.reps; i++) {
-        const frac = (i+1) / blk.reps;
-        const a = Math.max(5, Math.round(ang * frac));
-        const s = Math.round(spd * (0.35 + 0.65*frac));
-        const r = Math.round(rest * (1.6 - 0.9*frac));
-        const aSteps = Math.round((a * GR / 360) * PPR);
+        const frac    = (i+1) / blk.reps;
+        const a       = Math.max(5, Math.round(ang * frac));
+        const s       = Math.round(spd * (0.35 + 0.65*frac));
+        const r       = Math.round(rest * (1.6 - 0.9*frac));
+        const aSteps  = Math.round((a * GR / 360) * PPR);
         out.push(["speed", s]);
-        out.push(["move",  inv * aSteps], ["wait_pend"]);
+        out.push(["offset",  inv * (aSteps + prevSteps)], ["wait_pend"]);
         if (r > 0) out.push(["wait", r]);
-        out.push(["move", -inv * aSteps], ["wait_pend"]);
+        out.push(["offset", -inv * 2 * aSteps], ["wait_pend"]);
         if (r > 0) out.push(["wait", r]);
+        prevSteps = aSteps;
       }
       out.push(["speed", spd]);
+
+    } else if (blk.type === "swing") {
+      // Single directional offset move — use as a transition between blocks
+      const angSteps = Math.round((ang * GR / 360) * PPR);
+      const dir = blk.dir ?? 1;
+      out.push(["speed", spd]);
+      out.push(["offset", inv * dir * angSteps], ["wait_pend"]);
+      if (rest > 0) out.push(["wait", rest]);
 
     } else if (blk.type === "pause") {
       out.push(["wait", blk.ms ?? 1000]);
@@ -459,7 +487,7 @@ function Btn({children,onClick,v="d",sm=false,style:sx={}}) {
 }
 
 // ─── Block card ───────────────────────────────────────────────────────────────
-const ICONS = {pendulum:"⇌",wave:"〜",spin:"↻",buildup:"↑",pause:"⏸"};
+const ICONS = {pendulum:"⇌",wave:"〜",spin:"↻",buildup:"↑",pause:"⏸",swing:"→"};
 
 function BlockCard({blk,colIdx,selected,hasRisk,G,onSelect,onRemove,onChange}) {
   const col = BLK_COLS[colIdx % BLK_COLS.length];
@@ -476,6 +504,7 @@ function BlockCard({blk,colIdx,selected,hasRisk,G,onSelect,onRemove,onChange}) {
     spin:     `${blk.continuous?"∞":(blk.revs??2)} rev · ${blk.dir==="both"?"CW+CCW":blk.dir>0?"CW":"CCW"} · ${spd}sps`,
     buildup:  `${blk.reps}× to ${ang}°`,
     pause:    `${((blk.ms??1000)/1000).toFixed(1)}s`,
+    swing:    `${(blk.dir??1)>0?"→ Right":"← Left"} · ${ang}°`,
   }[blk.type] || "";
 
   const upd = patch => onChange({...blk,...patch});
@@ -530,6 +559,17 @@ function BlockCard({blk,colIdx,selected,hasRisk,G,onSelect,onRemove,onChange}) {
             </div>
           </>}
 
+          {blk.type==="swing"&&(
+            <div>
+              <div style={{fontFamily:"monospace",fontSize:9,letterSpacing:"0.12em",
+                textTransform:"uppercase",color:"#4a4a6a",marginBottom:5}}>Direction</div>
+              <div style={{display:"flex",gap:5}}>
+                <Btn sm v={(blk.dir??1)===1?"a":"d"} onClick={()=>upd({dir:1})}>→ Right</Btn>
+                <Btn sm v={(blk.dir??1)===-1?"a":"d"} onClick={()=>upd({dir:-1})}>← Left</Btn>
+              </div>
+            </div>
+          )}
+
           {blk.type==="pause"&&
             <Slider label="Duration" value={blk.ms??1000} min={100} max={10000} step={100}
               fmt={v=>`${(v/1000).toFixed(1)}s`} onChange={v=>upd({ms:v})}/>}
@@ -566,6 +606,18 @@ function BlockCard({blk,colIdx,selected,hasRisk,G,onSelect,onRemove,onChange}) {
             )}
             {blk.restMs!=null&&<Slider label="Rest" value={blk.restMs} min={0} max={3000} step={50}
               fmt={v=>v===0?"none":`${v}ms`} onChange={v=>upd({restMs:v})}/>}
+            <div style={{display:"flex",gap:5}}>
+              <Btn sm v={blk.brk!=null?"a":"d"}
+                onClick={()=>upd({brk: blk.brk!=null ? null : G.brk})}>
+                {blk.brk!=null ? `brk:${blk.brk?"on":"off"}` : "+ brk"}
+              </Btn>
+              <Btn sm v={blk.soft!=null?"a":"d"}
+                onClick={()=>upd({soft: blk.soft!=null ? null : G.soft})}>
+                {blk.soft!=null ? `soft:${blk.soft?"on":"off"}` : "+ soft"}
+              </Btn>
+            </div>
+            {blk.brk!=null&&<Tog label="Braking" on={!!blk.brk} set={v=>upd({brk:v})}/>}
+            {blk.soft!=null&&<Tog label="Soft-start" on={!!blk.soft} set={v=>upd({soft:v})}/>}
             <Tog label="Invert this block" on={!!blk.invert} set={v=>upd({invert:v})}/>
           </div>
         </div>
@@ -598,7 +650,11 @@ export default function App() {
   const [selIdx,  setSelIdx]  = useState(-1);
   const [sim,     setSim]     = useState(null);
   const [seqName, setSeqName] = useState("");
-  const [saved,   setSaved]   = useState({});
+  const [saved,   setSaved]   = useState(() => {
+    try { return JSON.parse(localStorage.getItem("whip_saved") || "{}"); }
+    catch { return {}; }
+  });
+  const [piSyncing, setPiSyncing] = useState(false);
   const [tab,     setTab]     = useState("compose");
 
   // Pi4 connection
@@ -618,6 +674,7 @@ export default function App() {
   const syncTimer = useRef(null);
   const piStatusRef = useRef(null);
   useEffect(() => { piStatusRef.current = piStatus; }, [piStatus]);
+  useEffect(() => { localStorage.setItem("whip_saved", JSON.stringify(saved)); }, [saved]);
 
   // animation
   const [animDeg, setAnimDeg] = useState(0);
@@ -673,7 +730,8 @@ export default function App() {
     try {
       await fetch(`${piUrl}/api/sequences`, {
         method:"POST", headers:{"Content-Type":"application/json"},
-        body: JSON.stringify({name:n, steps}),
+        // Include blocks+globals so the Pi4 copy is fully round-trippable
+        body: JSON.stringify({name:n, steps, blocks, globals:G}),
         signal: AbortSignal.timeout(8000),
       });
       await fetch(`${piUrl}/api/sequences/${encodeURIComponent(n)}/run`, {
@@ -681,6 +739,8 @@ export default function App() {
         body: JSON.stringify({loop: loopMode}),
         signal: AbortSignal.timeout(8000),
       });
+      // Auto-save to local library whenever we push to Pi4
+      setSaved(s => ({...s, [n]: {name:n, blocks:[...blocks], G}}));
     } catch(e) { setPiErr(e.message ?? "timeout — is the Pi4 server running?"); }
     finally { setPiRunning(false); }
   };
@@ -709,6 +769,10 @@ export default function App() {
       const st = piStatusRef.current;
       if (!st?.engine?.running) return;
       const n = st.engine.name;
+      // Only sync if we're editing the sequence that's actually running —
+      // otherwise we'd silently overwrite a different sequence (e.g. autostart)
+      // with whatever happens to be in the compose view.
+      if ((seqName.trim() || "sequence").replace(/\//g,"-") !== n) return;
       const steps = compileToSteps(blocks, G);
       setSyncPending(true);
       try {
@@ -725,7 +789,7 @@ export default function App() {
       } catch {} finally { setSyncPending(false); }
     }, 800);
     return () => clearTimeout(syncTimer.current);
-  }, [blocks, speed, angle, restMs, brk, soft, angleMult, restMult, invert, liveSync, piUrl, loopMode]);
+  }, [blocks, speed, angle, restMs, brk, soft, angleMult, restMult, invert, liveSync, piUrl, loopMode, seqName]);
 
   const addBlock = type => {
     const nb = mkBlk(type);
@@ -752,12 +816,38 @@ export default function App() {
     const n=`${base}_${ts}`;
     setSaved(s=>({...s,[n]:{name:n,blocks:[...blocks],G}}));
   };
-  const loadSeq = n=>{const d=saved[n];if(!d)return;setBlocks(d.blocks);setSeqName(d.name);
-    if(d.G){setSpeed(d.G.speed);setAngle(d.G.angle);setRestMs(d.G.restMs);setBrk(d.G.brk);setSoft(d.G.soft);
-      if(d.G.angleMult!=null)setAngleMult(d.G.angleMult);
-      if(d.G.restMult!=null)setRestMult(d.G.restMult);
-      if(d.G.invert!=null)setInvert(d.G.invert);}
+  const loadSeq = n=>{const d=saved[n];if(!d)return;setBlocks(d.blocks||[]);setSeqName(d.name);
+    const g = d.G ?? d.globals;
+    if(g){setSpeed(g.speed);setAngle(g.angle);setRestMs(g.restMs);setBrk(g.brk);setSoft(g.soft);
+      if(g.angleMult!=null)setAngleMult(g.angleMult);
+      if(g.restMult!=null)setRestMult(g.restMult);
+      if(g.invert!=null)setInvert(g.invert);}
     setSelIdx(-1);setTab("compose");};
+
+  const syncFromPi = async () => {
+    setPiSyncing(true);
+    try {
+      const listRes = await fetch(`${piUrl}/api/sequences`, {signal:AbortSignal.timeout(5000)});
+      const names = await listRes.json();
+      const entries = await Promise.all(names.map(async nm => {
+        try {
+          const r = await fetch(`${piUrl}/api/sequences/${encodeURIComponent(nm)}`,
+            {signal:AbortSignal.timeout(5000)});
+          return await r.json();
+        } catch { return null; }
+      }));
+      setSaved(s => {
+        const next = {...s};
+        for (const d of entries) {
+          if (!d) continue;
+          const g = d.globals ?? d.G;
+          next[d.name] = {name:d.name, blocks:d.blocks||[], G:g||null};
+        }
+        return next;
+      });
+    } catch(e) { setPiErr(e.message ?? "sync failed"); }
+    finally { setPiSyncing(false); }
+  };
 
   const exportJSON = ()=>{
     const n=seqName.trim()||"sequence";
@@ -849,7 +939,8 @@ export default function App() {
               <span style={lbl}>Add block</span>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
                 {[["pendulum","⇌ Pendulum"],["wave","〜 Wave"],
-                  ["spin","↻ Spin"],["buildup","↑ Build-up"],["pause","⏸ Pause"]
+                  ["spin","↻ Spin"],["buildup","↑ Build-up"],
+                  ["swing","→ Swing"],["pause","⏸ Pause"]
                 ].map(([type,label])=>(
                   <Btn key={type} onClick={()=>addBlock(type)}>{label}</Btn>
                 ))}
@@ -914,14 +1005,25 @@ export default function App() {
           </>}
 
           {tab==="library"&&<>
-            <span style={lbl}>Saved sequences</span>
+            <div style={{display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+              <span style={lbl}>Saved sequences</span>
+              <Btn sm v="a" onClick={syncFromPi} style={{opacity:piSyncing?0.5:1}}>
+                {piSyncing?"syncing…":"↓ Sync Pi4"}
+              </Btn>
+            </div>
             {Object.keys(saved).length===0
-              ? <div style={{fontFamily:"monospace",fontSize:10,color:"#1e1e30"}}>Nothing saved yet.</div>
+              ? <div style={{fontFamily:"monospace",fontSize:10,color:"#1e1e30"}}>Nothing saved yet. Hit "↓ Sync Pi4" to pull from the Pi.</div>
               : Object.keys(saved).sort().map(n=>(
                 <div key={n} style={{display:"flex",alignItems:"center",gap:5,padding:"7px 9px",
                   border:`1px solid ${BDR}`,borderRadius:6,background:SURF}}>
-                  <span style={{flex:1,fontFamily:"monospace",fontSize:11}}>{n}</span>
-                  <Btn sm onClick={()=>loadSeq(n)}>LOAD</Btn>
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{fontFamily:"monospace",fontSize:11,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{n}</div>
+                    {saved[n]?.blocks?.length
+                      ? <div style={{fontFamily:"monospace",fontSize:9,color:"#3ccc7c"}}>{saved[n].blocks.length} blocks</div>
+                      : <div style={{fontFamily:"monospace",fontSize:9,color:MUT}}>steps only</div>}
+                  </div>
+                  <Btn sm onClick={()=>loadSeq(n)} style={{opacity:saved[n]?.blocks?.length?1:0.4,
+                    cursor:saved[n]?.blocks?.length?"pointer":"not-allowed"}}>LOAD</Btn>
                   <Btn sm v="r" onClick={()=>setSaved(s=>{const x={...s};delete x[n];return x;})}>✕</Btn>
                 </div>
               ))

@@ -90,6 +90,18 @@ class SerialManager:
                     print(f"Write error: {e}")
                     self.connected = False
 
+    def flush_and_stop(self):
+        """Discard all queued outgoing bytes, then send stop.
+        Prevents a flood of 'cw'/'ccw' commands from blocking the stop."""
+        with self.lock:
+            if self.ser and self.ser.is_open:
+                try:
+                    self.ser.reset_output_buffer()   # drop queued tx bytes
+                    self.ser.write(b"stop\n")
+                except Exception as e:
+                    print(f"flush_and_stop error: {e}")
+                    self.connected = False
+
     def read_available(self) -> list:
         lines = []
         with self.lock:
@@ -127,34 +139,40 @@ class SequenceEngine:
         self.total_steps = 0
         self._stop = False
         self._task = None
+        self._gen  = 0   # incremented on every start(); stale tasks self-abort
 
     def start(self, steps: list, name: str, loop: bool, event_loop):
-        # Kill the running task and halt the Pico before starting anything new
+        # Invalidate any in-flight task BEFORE touching serial
+        self._gen += 1
+        gen = self._gen
         self._stop = True
         if self._task and not self._task.done():
             self._task.cancel()
-        serial_mgr.send("stop")
-        serial_mgr.pending_wait_t0 = None  # discard stale wait state
-        time.sleep(0.05)                   # let cancellation propagate
+        serial_mgr.flush_and_stop()        # flush queued commands, then send stop
+        serial_mgr.pending_wait_t0 = None
+        time.sleep(0.15)                   # let cancellation + Pico stop propagate
 
         self._stop = False
         self.loop_mode = loop
         self.current_name = name
         self._task = asyncio.run_coroutine_threadsafe(
-            self._run(steps), event_loop
+            self._run(steps, gen), event_loop
         )
 
     def stop(self):
+        self._gen += 1
         self._stop = True
         if self._task:
             self._task.cancel()
         self.running = False
-        serial_mgr.send("stop")
+        serial_mgr.flush_and_stop()
 
-    async def _run(self, steps: list):
+    def _dead(self, gen: int) -> bool:
+        return self._stop or self._gen != gen
+
+    async def _run(self, steps: list, gen: int):
         self.running = True
         self.total_steps = len(steps)
-        # Find loop_start marker — subsequent iterations skip everything before it
         loop_start = next(
             (i + 1 for i, s in enumerate(steps) if s and s[0] == "loop_start"), 0
         )
@@ -164,21 +182,21 @@ class SequenceEngine:
                 start = 0 if first else loop_start
                 first = False
                 for i in range(start, len(steps)):
-                    if self._stop:
+                    if self._dead(gen):
                         return
                     step = steps[i]
                     self.step_index = i + 1
                     cmd = step[0] if len(step) > 0 else ""
                     val = step[1] if len(step) > 1 else None
-                    await self._execute(cmd, val)
+                    await self._execute(cmd, val, gen)
                 if not self.loop_mode:
                     break
         finally:
             self.running = False
             self.step_index = 0
 
-    async def _execute(self, cmd: str, val):
-        if self._stop:
+    async def _execute(self, cmd: str, val, gen: int):
+        if self._dead(gen):
             return
 
         if cmd == "wait":
@@ -186,31 +204,26 @@ class SequenceEngine:
             await asyncio.sleep(ms / 1000.0)
 
         elif cmd == "wait_pend":
-            # t0 was captured just before the movement command was sent,
-            # so we correctly detect "Target reached" even if the move
-            # finishes very quickly (within the 50 ms post-send sleep).
             t0 = serial_mgr.pending_wait_t0 if serial_mgr.pending_wait_t0 is not None \
                  else (time.time() - 0.1)
             serial_mgr.pending_wait_t0 = None
             deadline = t0 + 15.0
-            while time.time() < deadline and not self._stop:
+            while time.time() < deadline and not self._dead(gen):
                 if serial_mgr.last_target_time > t0:
                     break
                 await asyncio.sleep(0.02)
-            # No settle delay — braking already stops the motor cleanly
 
         elif cmd == "loop_start":
-            pass  # marker only — handled by _run()
+            pass
 
         elif cmd == "ramp_speed":
-            # {"from":500,"to":4000,"steps":10,"step_ms":200}
             if isinstance(val, dict):
                 frm = int(val.get("from", 500))
                 to  = int(val.get("to", 2000))
                 n   = int(val.get("steps", 10))
                 ms  = int(val.get("step_ms", 200))
                 for i in range(n + 1):
-                    if self._stop:
+                    if self._dead(gen):
                         return
                     spd = int(frm + (to - frm) * i / n)
                     serial_mgr.send(f"speed {spd}")
@@ -222,14 +235,11 @@ class SequenceEngine:
                 inner = val.get("steps", [])
                 for _ in range(times):
                     for s in inner:
-                        if self._stop:
+                        if self._dead(gen):
                             return
-                        await self._execute(s[0], s[1] if len(s) > 1 else None)
+                        await self._execute(s[0], s[1] if len(s) > 1 else None, gen)
 
         else:
-            # Movement commands need a full 50 ms so pending_wait_t0 is safely set
-            # before any "Target reached" can arrive.  Parameter commands (speed,
-            # angle, brakeon …) only need a short flush delay.
             _MOVE_CMDS = {"left", "right", "move", "offset", "cw", "ccw"}
             is_move = cmd in _MOVE_CMDS
             if is_move:
@@ -238,9 +248,10 @@ class SequenceEngine:
                 serial_mgr.send(f"{cmd} {val}")
             else:
                 serial_mgr.send(cmd)
-            # 20 ms for movement commands (Pico won't finish any real move that fast),
-            # 10 ms for parameter commands (just needs serial flush time)
             await asyncio.sleep(0.02 if is_move else 0.01)
+            # After the sleep a stale task must not continue — check generation
+            if self._dead(gen):
+                return
 
 engine = SequenceEngine()
 
@@ -491,8 +502,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/sequences":
             name  = data.get("name", "untitled").strip().replace("/", "-")
             steps = data.get("steps", [])
+            # Preserve blocks + globals so the UI can load them back as editable
+            payload = {"name": name, "steps": steps}
+            if "blocks"  in data: payload["blocks"]  = data["blocks"]
+            if "globals" in data: payload["globals"] = data["globals"]
             f = SEQUENCES_DIR / f"{name}.json"
-            f.write_text(json.dumps({"name": name, "steps": steps}, indent=2))
+            f.write_text(json.dumps(payload, indent=2))
             self.send_json({"ok": True, "name": name})
             return
 
