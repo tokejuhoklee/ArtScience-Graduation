@@ -1,0 +1,16 @@
+[Unit]
+Description=Whip Installation Controller
+After=network.target
+
+[Service]
+Type=simple
+User=router
+WorkingDirectory=/home/router/whip
+ExecStart=/home/router/whip/venv/bin/python3 /home/router/whip/server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,878 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>On Acquiescence — Control</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600&family=Space+Grotesk:wght@300;400;600&display=swap');
+:root {
+  --bg:#080810; --surface:#0e0e1a; --border:#1e1e32; --dim:#2a2a42;
+  --muted:#5a5a7a; --text:#c8c8e0; --bright:#e8e8f8;
+  --accent:#7c5cfc; --accent2:#fc5c7c; --green:#4cfc9c; --warn:#fc9c4c;
+  --mono:'JetBrains Mono',monospace; --sans:'Space Grotesk',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0;}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;}
+#app{display:grid;grid-template-columns:300px 1fr;grid-template-rows:44px 1fr;height:100vh;overflow:hidden;}
+
+#topbar{grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:0 14px;
+  background:var(--surface);border-bottom:1px solid var(--border);}
+#topbar h1{font-family:var(--mono);font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);flex:1;}
+.pill{font-family:var(--mono);font-size:10px;padding:3px 9px;border-radius:100px;
+  background:var(--dim);color:var(--muted);white-space:nowrap;}
+.pill.on{background:#0d2a1a;color:var(--green);}
+.pill.err{background:#2a0d0d;color:var(--accent2);}
+.pill.run{background:#1a0d2a;color:var(--accent);}
+.pill.offline{background:#1a1a0a;color:var(--warn);}
+#pi4-input{font-family:var(--mono);font-size:10px;background:var(--dim);border:1px solid var(--border);
+  color:var(--text);padding:3px 7px;border-radius:5px;width:165px;}
+#pi4-input:focus{outline:none;border-color:var(--accent);}
+
+#left{display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden;}
+.tabs{display:flex;border-bottom:1px solid var(--border);}
+.tab{flex:1;padding:10px 4px;text-align:center;font-family:var(--mono);font-size:10px;
+  letter-spacing:.08em;text-transform:uppercase;color:var(--muted);cursor:pointer;
+  border-bottom:2px solid transparent;margin-bottom:-1px;transition:color .15s,border-color .15s;}
+.tab.active{color:var(--bright);border-color:var(--accent);}
+.tab:hover{color:var(--text);}
+.pane{display:none;flex:1;overflow-y:auto;padding:11px;flex-direction:column;gap:9px;}
+.pane.active{display:flex;}
+
+.lbl{font-family:var(--mono);font-size:9px;letter-spacing:.15em;text-transform:uppercase;color:var(--muted);margin-bottom:4px;}
+.btn-row{display:flex;gap:5px;}
+.btn{flex:1;padding:8px 5px;border:1px solid var(--border);border-radius:6px;background:var(--surface);
+  color:var(--text);font-family:var(--mono);font-size:11px;cursor:pointer;
+  transition:background .1s,border-color .1s,color .1s;text-align:center;user-select:none;}
+.btn:hover{border-color:var(--dim);color:var(--bright);}
+.btn:active{transform:scale(.97);}
+.btn.accent{background:#1a0d3a;border-color:var(--accent);color:var(--accent);}
+.btn.green{background:#0d2a1a;border-color:var(--green);color:var(--green);}
+.btn.red{background:#2a0d0d;border-color:var(--accent2);color:var(--accent2);}
+.btn.warn{background:#2a1a0d;border-color:var(--warn);color:var(--warn);}
+.btn.sm{padding:5px 6px;font-size:10px;}
+.btn.full{flex:none;width:100%;}
+.btn.disabled{opacity:.35;cursor:not-allowed;pointer-events:none;}
+
+.slider-block{display:flex;flex-direction:column;gap:3px;}
+.slider-row{display:flex;align-items:center;gap:8px;}
+.slider-val{font-family:var(--mono);font-size:12px;color:var(--bright);min-width:52px;text-align:right;}
+input[type=range]{flex:1;-webkit-appearance:none;height:3px;border-radius:2px;background:var(--dim);outline:none;}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;
+  border-radius:50%;background:var(--accent);cursor:pointer;border:2px solid var(--bg);}
+
+.toggle-row{display:flex;align-items:center;justify-content:space-between;}
+.toggle-lbl{font-size:12px;color:var(--text);}
+.tog{position:relative;width:30px;height:17px;background:var(--dim);border-radius:9px;
+  cursor:pointer;transition:background .2s;}
+.tog.on{background:var(--accent);}
+.tog::after{content:'';position:absolute;width:11px;height:11px;border-radius:50%;
+  background:var(--bg);top:3px;left:3px;transition:left .2s;}
+.tog.on::after{left:16px;}
+
+select,input[type=number],input[type=text]{background:var(--surface);border:1px solid var(--border);
+  border-radius:5px;color:var(--text);font-family:var(--mono);font-size:11px;padding:5px 7px;width:100%;}
+select:focus,input:focus{outline:none;border-color:var(--accent);}
+
+#log{background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:7px;
+  font-family:var(--mono);font-size:10px;line-height:1.6;overflow-y:auto;
+  color:var(--muted);min-height:60px;max-height:160px;}
+.logline{border-bottom:1px solid #0a0a12;padding:1px 0;}
+.logline.fresh{color:var(--text);}
+
+#seq-list{background:var(--bg);border:1px solid var(--border);border-radius:5px;
+  overflow-y:auto;max-height:220px;min-height:32px;}
+.sitem{display:flex;align-items:center;gap:5px;padding:5px 7px;
+  border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px;cursor:pointer;}
+.sitem:hover{background:var(--surface);}
+.sitem.sel{background:#1a0d3a;}
+.sitem.risk{border-left:3px solid var(--accent2);}
+.sn{color:var(--muted);min-width:18px;font-size:10px;}
+.sc{color:var(--accent);flex:1;}
+.sv{color:var(--warn);}
+.sdel{color:var(--muted);padding:1px 4px;border-radius:3px;}
+.sdel:hover{color:var(--accent2);}
+
+.saved-item{display:flex;align-items:center;gap:5px;padding:6px 8px;
+  border:1px solid var(--border);border-radius:5px;background:var(--surface);margin-bottom:4px;}
+.saved-name{flex:1;font-family:var(--mono);font-size:11px;}
+
+hr{border:none;border-top:1px solid var(--border);}
+.step-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px;}
+.name-row{display:flex;gap:5px;}
+.name-row input{flex:1;}
+.notice{background:#1a1a0a;border:1px solid #3a3a0a;border-radius:6px;
+  padding:8px 10px;font-family:var(--mono);font-size:10px;color:var(--warn);line-height:1.7;}
+
+#right{display:flex;flex-direction:column;overflow:hidden;}
+#viz-bar{display:flex;align-items:center;gap:7px;padding:7px 12px;
+  border-bottom:1px solid var(--border);background:var(--surface);flex-shrink:0;}
+#viz-bar .lbl{margin:0;}
+#viz-info{font-family:var(--mono);font-size:10px;color:var(--muted);flex:1;text-align:right;}
+#viz-wrap{flex:1;display:grid;grid-template-rows:1fr 130px;overflow:hidden;padding:8px;gap:7px;}
+canvas{width:100%;height:100%;border-radius:7px;background:var(--surface);
+  border:1px solid var(--border);display:block;}
+</style>
+</head>
+<body>
+<div id="app">
+
+<div id="topbar">
+  <h1>On Acquiescence</h1>
+  <input id="pi4-input" placeholder="Pi4 IP — e.g. 192.168.1.42">
+  <div class="btn sm" onclick="tryConnect()" style="flex:none;white-space:nowrap">CONNECT</div>
+  <span id="pill-conn" class="pill offline">OFFLINE</span>
+  <span id="pill-serial" class="pill" style="display:none">SERIAL</span>
+  <span id="pill-engine" class="pill" style="display:none">IDLE</span>
+</div>
+
+<div id="left">
+  <div class="tabs">
+    <div class="tab active" data-tab="compose">COMPOSE</div>
+    <div class="tab" data-tab="perform">PERFORM</div>
+    <div class="tab" data-tab="library">LIBRARY</div>
+  </div>
+
+  <!-- ── COMPOSE ── -->
+  <div class="pane active" id="tab-compose">
+    <div id="offline-notice" class="notice">
+      ◈ OFFLINE — build &amp; visualise sequences freely.<br>
+      Enter Pi4 IP above to enable live motor control.
+    </div>
+
+    <div>
+      <div class="lbl">Quick patterns</div>
+      <div class="btn-row">
+        <div class="btn sm" onclick="addPattern('pendulum')">Pendulum</div>
+        <div class="btn sm" onclick="addPattern('buildup')">Build-up</div>
+        <div class="btn sm" onclick="addPattern('spin')">Full spin</div>
+        <div class="btn sm" onclick="addPattern('wave')">Wave</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="lbl">Add step</div>
+      <div class="step-grid">
+        <select id="step-cmd" onchange="onCmdChange()">
+          <optgroup label="Motion">
+            <option value="left">left</option>
+            <option value="right">right</option>
+            <option value="neutral">neutral</option>
+            <option value="cw">cw  (continuous)</option>
+            <option value="ccw">ccw (continuous)</option>
+          </optgroup>
+          <optgroup label="Timing">
+            <option value="wait">wait (ms)</option>
+            <option value="wait_pend">wait_pend</option>
+          </optgroup>
+          <optgroup label="Parameters">
+            <option value="angle">angle (°)</option>
+            <option value="speed">speed (sps)</option>
+            <option value="delay">pend delay (ms)</option>
+          </optgroup>
+          <optgroup label="Flags">
+            <option value="brakeon">brakeon</option>
+            <option value="brakeoff">brakeoff</option>
+            <option value="softstarton">softstarton</option>
+            <option value="softstartoff">softstartoff</option>
+            <option value="on">motor on</option>
+            <option value="off">motor off</option>
+            <option value="calibrate">calibrate</option>
+          </optgroup>
+        </select>
+        <input type="number" id="step-val" value="500" placeholder="value">
+      </div>
+      <div class="btn-row" style="margin-top:5px">
+        <div class="btn green sm full" onclick="addStep()">+ ADD STEP</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="lbl" style="display:flex;justify-content:space-between">
+        <span>Sequence</span>
+        <span id="seq-stats" style="color:var(--muted);font-size:9px"></span>
+      </div>
+      <div id="seq-list"></div>
+      <div class="btn-row" style="margin-top:5px">
+        <div class="btn sm red" onclick="clearSeq()">CLEAR</div>
+        <div class="btn sm" onclick="moveUp()">↑</div>
+        <div class="btn sm" onclick="moveDn()">↓</div>
+        <div class="btn sm" onclick="dupStep()">DUP</div>
+      </div>
+    </div>
+
+    <div>
+      <div class="lbl">Preview &amp; save</div>
+      <div class="btn-row">
+        <div class="btn accent sm" onclick="preview()">▶ PREVIEW</div>
+        <div class="btn sm" onclick="exportJSON()">↓ JSON</div>
+        <input type="file" id="import-file" accept=".json" style="display:none" onchange="importJSON(this)">
+        <div class="btn sm" onclick="document.getElementById('import-file').click()">↑ IMPORT</div>
+      </div>
+      <div class="name-row" style="margin-top:5px">
+        <input type="text" id="seq-name" placeholder="sequence name">
+        <div class="btn sm green" style="flex:none;white-space:nowrap" onclick="saveSeq()">SAVE</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── PERFORM ── -->
+  <div class="pane" id="tab-perform">
+    <div id="perform-notice" class="notice">Connect to Pi4 to use live controls.</div>
+
+    <div>
+      <div class="lbl">Motor</div>
+      <div class="btn-row">
+        <div class="btn green live" onclick="cmd('on')">ENABLE</div>
+        <div class="btn live" onclick="cmd('off')">DISABLE</div>
+        <div class="btn red live" onclick="cmd('stop')">STOP</div>
+      </div>
+    </div>
+    <div>
+      <div class="lbl">Movement</div>
+      <div class="btn-row">
+        <div class="btn accent live" onclick="cmd('left')">◀ LEFT</div>
+        <div class="btn live" onclick="cmd('neutral')">● CTR</div>
+        <div class="btn accent live" onclick="cmd('right')">RIGHT ▶</div>
+      </div>
+      <div class="btn-row" style="margin-top:5px">
+        <div class="btn warn live" onclick="cmd('cw')">↻ CW</div>
+        <div class="btn warn live" onclick="cmd('ccw')">↺ CCW</div>
+        <div class="btn live" onclick="cmd('pend')">⇌ PEND</div>
+      </div>
+    </div>
+
+    <div class="slider-block">
+      <div class="lbl">Speed <span id="rpm-lbl" style="color:var(--warn);font-size:9px"></span></div>
+      <div class="slider-row">
+        <input type="range" id="sl-speed" min="50" max="10000" value="2000" oninput="onSpeed(this.value)">
+        <span class="slider-val" id="lbl-speed">2000</span>
+      </div>
+      <div class="btn-row">
+        <div class="btn sm live" onclick="setSpeed(500)">slow</div>
+        <div class="btn sm live" onclick="setSpeed(2000)">mid</div>
+        <div class="btn sm live" onclick="setSpeed(5000)">fast</div>
+        <div class="btn sm live" onclick="setSpeed(8000)">max</div>
+      </div>
+    </div>
+
+    <div class="slider-block">
+      <div class="lbl">Angle (arm °)</div>
+      <div class="slider-row">
+        <input type="range" id="sl-angle" min="5" max="360" value="90" oninput="onAngle(this.value)">
+        <span class="slider-val" id="lbl-angle">90°</span>
+      </div>
+      <div class="btn-row">
+        <div class="btn sm live" onclick="setAngle(45)">45°</div>
+        <div class="btn sm live" onclick="setAngle(90)">90°</div>
+        <div class="btn sm live" onclick="setAngle(180)">180°</div>
+        <div class="btn sm live" onclick="setAngle(360)">360°</div>
+      </div>
+    </div>
+
+    <div class="slider-block">
+      <div class="lbl">Pendulum delay (ms)</div>
+      <div class="slider-row">
+        <input type="range" id="sl-delay" min="0" max="5000" step="50" value="500" oninput="onDelay(this.value)">
+        <span class="slider-val" id="lbl-delay">500</span>
+      </div>
+    </div>
+
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <div class="toggle-row"><span class="toggle-lbl">Braking</span><div class="tog on" id="tog-brake" onclick="toggleBrake()"></div></div>
+      <div class="toggle-row"><span class="toggle-lbl">Soft-start</span><div class="tog on" id="tog-soft" onclick="toggleSoft()"></div></div>
+      <div class="toggle-row"><span class="toggle-lbl">Disable at rest</span><div class="tog" id="tog-rest" onclick="toggleRest()"></div></div>
+    </div>
+
+    <hr>
+    <div>
+      <div class="lbl">Raw command</div>
+      <div class="btn-row">
+        <input type="text" id="raw-cmd" placeholder="e.g. offset 200"
+               onkeydown="if(event.key==='Enter')sendRaw()">
+        <div class="btn sm live" onclick="sendRaw()" style="flex:none;padding:5px 10px">SEND</div>
+      </div>
+    </div>
+    <div>
+      <div class="lbl">Serial log</div>
+      <div id="log"></div>
+    </div>
+  </div>
+
+  <!-- ── LIBRARY ── -->
+  <div class="pane" id="tab-library">
+    <div>
+      <div class="lbl">Saved sequences</div>
+      <div id="saved-list"></div>
+      <div class="btn-row" style="margin-top:6px">
+        <div class="btn sm" onclick="loadLibrary()">↺ REFRESH</div>
+      </div>
+    </div>
+    <hr>
+    <div>
+      <div class="lbl">Run on motor</div>
+      <div id="run-status" style="font-family:var(--mono);font-size:10px;color:var(--muted);padding:5px 0">
+        No sequence running
+      </div>
+      <div class="toggle-row" style="margin:6px 0">
+        <span class="toggle-lbl">Loop forever</span>
+        <div class="tog" id="tog-loop" onclick="toggleLoop()"></div>
+      </div>
+      <div class="btn red sm full live" style="margin-top:4px" onclick="stopEngine()">■ STOP ENGINE</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── VISUALIZER ── -->
+<div id="right">
+  <div id="viz-bar">
+    <span class="lbl" style="margin:0">VISUALIZER</span>
+    <div class="btn sm accent" onclick="preview()">▶ PREVIEW</div>
+    <div class="btn sm" onclick="stopViz()">■ STOP</div>
+    <div class="btn sm" onclick="resetViz()">⌖ RESET</div>
+    <span id="viz-info">No sequence loaded — build one in COMPOSE or import a JSON.</span>
+  </div>
+  <div id="viz-wrap">
+    <canvas id="arm-canvas"></canvas>
+    <canvas id="tl-canvas"></canvas>
+  </div>
+</div>
+
+</div>
+<script>
+// ═══════════════════════════════════════
+// Constants
+// ═══════════════════════════════════════
+const PULSES_PER_REV = 400;
+const GEAR_RATIO     = 5.0;
+const RAMP_STEPS     = 150;
+
+// ═══════════════════════════════════════
+// State
+// ═══════════════════════════════════════
+let PI4 = null, WS = null, connected = false;
+let loopMode=false, braking=true, softStart=true, atRest=false;
+let currentSpeed=2000, currentAngle=90;
+let sequence=[], selectedIdx=-1, timeline=null;
+
+// ═══════════════════════════════════════
+// Simulator (pure JS — no server needed)
+// ═══════════════════════════════════════
+function calcMoveTime(p0,p1,speed,brk,soft){
+  const dist=Math.abs(p1-p0); if(!dist) return 0;
+  const steps=(dist*GEAR_RATIO/360)*PULSES_PER_REV;
+  let t=steps/Math.max(speed,1);
+  if(soft&&steps>RAMP_STEPS) t+=0.15;
+  if(brk &&steps>RAMP_STEPS) t+=0.15;
+  return t;
+}
+
+function simulate(steps){
+  const events=[];
+  let t=0,pos=0,angle=90,speed=2000,brk=true,soft=true;
+  for(const step of steps){
+    const cmd=step[0], val=step[1]??null;
+    if(cmd==='left'){
+      const p1=pos+angle, dt=calcMoveTime(pos,p1,speed,brk,soft);
+      events.push({type:'move',t0:t,t1:t+dt,p0:pos,p1,speed,braking:brk,softstart:soft});
+      pos=p1; t+=dt;
+    }else if(cmd==='right'){
+      const p1=pos-angle, dt=calcMoveTime(pos,p1,speed,brk,soft);
+      events.push({type:'move',t0:t,t1:t+dt,p0:pos,p1,speed,braking:brk,softstart:soft});
+      pos=p1; t+=dt;
+    }else if(cmd==='neutral'){
+      const p1=Math.round(pos/360)*360, dt=calcMoveTime(pos,p1,speed,brk,soft);
+      events.push({type:'move',t0:t,t1:t+dt,p0:pos,p1,speed,braking:brk,softstart:soft});
+      pos=p1; t+=dt;
+    }else if(cmd==='cw'||cmd==='ccw'){
+      const dt=calcMoveTime(0,360,speed,false,false);
+      events.push({type:'continuous',t0:t,t1:t+dt,dir:cmd==='cw'?1:-1,speed,pos});
+      t+=dt;
+    }else if(cmd==='wait'){
+      const ms=val??500;
+      events.push({type:'wait',t0:t,t1:t+ms/1000,pos});
+      t+=ms/1000;
+    }else if(cmd==='wait_pend'){
+      events.push({type:'wait_pend',t0:t,t1:t+0.1,pos});
+      t+=0.1;
+    }else if(cmd==='angle') angle=val??90;
+    else if(cmd==='speed')  speed=val??2000;
+    else if(cmd==='brakeon')    brk=true;
+    else if(cmd==='brakeoff')   brk=false;
+    else if(cmd==='softstarton')  soft=true;
+    else if(cmd==='softstartoff') soft=false;
+  }
+  // tangle risk: direction reversal with < 300ms gap
+  for(let i=1;i<events.length;i++){
+    const e=events[i],p=events[i-1];
+    e.tangleRisk=false;
+    if(e.type==='move'&&p.type==='move'){
+      if(Math.sign(p.p1-p.p0)!==Math.sign(e.p1-e.p0)&&(e.t0-p.t1)<0.3)
+        e.tangleRisk=true;
+    }
+  }
+  return{events,duration:t,finalPos:pos};
+}
+
+// ═══════════════════════════════════════
+// Pi4 connection
+// ═══════════════════════════════════════
+async function tryConnect(){
+  const host=document.getElementById('pi4-input').value.trim(); if(!host) return;
+  store.set('whip-pi4',host);
+  setPill('conn','offline','CONNECTING…');
+  try{
+    const ctrl=new AbortController(); const tid=setTimeout(()=>ctrl.abort(),3000);
+    const r=await fetch(`http://${host}:8080/api/status`,{signal:ctrl.signal}).finally(()=>clearTimeout(tid));
+    if(!r.ok) throw 0;
+    const d=await r.json();
+    PI4=`http://${host}:8080`; connected=true;
+    setPill('conn','on','CONNECTED');
+    document.getElementById('offline-notice').style.display='none';
+    document.getElementById('perform-notice').style.display='none';
+    document.querySelectorAll('.live').forEach(e=>e.classList.remove('disabled'));
+    document.getElementById('pill-serial').style.display='';
+    document.getElementById('pill-engine').style.display='';
+    updatePills(d); connectWS(host); loadLibrary();
+    appendLog([`✓ Connected to Pi4 at ${host}`]);
+  }catch{
+    setPill('conn','err','UNREACHABLE');
+    appendLog([`✗ Cannot reach ${host}:8080`]);
+  }
+}
+
+function setPill(id,cls,txt){
+  const el=document.getElementById('pill-'+id);
+  el.className='pill '+cls; el.textContent=txt;
+}
+
+function connectWS(host){
+  if(WS) WS.close();
+  WS=new WebSocket(`ws://${host}:8081`);
+  WS.onmessage=e=>{const d=JSON.parse(e.data);if(d.lines?.length)appendLog(d.lines);updatePills(d);};
+  WS.onclose=()=>{ if(connected) setTimeout(()=>connectWS(host),2000); };
+}
+
+function updatePills(d){
+  const ps=document.getElementById('pill-serial');
+  ps.className=d.serial?'pill on':'pill err';
+  ps.textContent=d.serial?'SERIAL OK':'NO SERIAL';
+  const pe=document.getElementById('pill-engine');
+  if(d.engine?.running){
+    pe.className='pill run';
+    pe.textContent=`▶ ${d.engine.name} ${d.engine.step}/${d.engine.total}`;
+    document.getElementById('run-status').textContent=
+      `Running: ${d.engine.name} — ${d.engine.step}/${d.engine.total}${d.engine.loop?' (loop)':''}`;
+  }else{
+    pe.className='pill'; pe.textContent='IDLE';
+    document.getElementById('run-status').textContent='No sequence running';
+  }
+}
+
+// ═══════════════════════════════════════
+// Commands
+// ═══════════════════════════════════════
+async function cmd(c){ if(PI4) await fetch(`${PI4}/api/cmd?c=${encodeURIComponent(c)}`); }
+function sendRaw(){ const v=document.getElementById('raw-cmd').value.trim(); if(v){cmd(v);document.getElementById('raw-cmd').value='';} }
+
+// ═══════════════════════════════════════
+// Sliders / toggles
+// ═══════════════════════════════════════
+function onSpeed(v){
+  currentSpeed=+v; document.getElementById('lbl-speed').textContent=v;
+  document.getElementById('rpm-lbl').textContent=`(${Math.round(v/400*60/5)} rpm)`;
+  cmd(`speed ${v}`);
+}
+function setSpeed(v){document.getElementById('sl-speed').value=v;onSpeed(v);}
+function onAngle(v){currentAngle=+v;document.getElementById('lbl-angle').textContent=v+'°';cmd(`angle ${v}`);}
+function setAngle(v){document.getElementById('sl-angle').value=v;onAngle(v);}
+function onDelay(v){document.getElementById('lbl-delay').textContent=v;cmd(`delay ${v}`);}
+
+function toggleBrake(){braking=!braking;setTog('tog-brake',braking);cmd(braking?'brakeon':'brakeoff');}
+function toggleSoft(){softStart=!softStart;setTog('tog-soft',softStart);cmd(softStart?'softstarton':'softstartoff');}
+function toggleRest(){atRest=!atRest;setTog('tog-rest',atRest);cmd(atRest?'reston':'restoff');}
+function toggleLoop(){loopMode=!loopMode;setTog('tog-loop',loopMode);}
+function setTog(id,on){document.getElementById(id).classList.toggle('on',on);}
+
+// ═══════════════════════════════════════
+// Log
+// ═══════════════════════════════════════
+function appendLog(lines){
+  const el=document.getElementById('log');
+  lines.forEach(l=>{
+    const d=document.createElement('div'); d.className='logline fresh'; d.textContent=l;
+    el.appendChild(d); setTimeout(()=>d.classList.remove('fresh'),1500);
+  });
+  while(el.children.length>100) el.removeChild(el.firstChild);
+  el.scrollTop=el.scrollHeight;
+}
+
+// ═══════════════════════════════════════
+// Tabs
+// ═══════════════════════════════════════
+document.querySelectorAll('.tab').forEach(t=>{
+  t.addEventListener('click',()=>{
+    document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    document.getElementById('tab-'+t.dataset.tab).classList.add('active');
+    if(t.dataset.tab==='library') loadLibrary();
+  });
+});
+// live buttons disabled until connected
+document.querySelectorAll('.live').forEach(el=>el.classList.add('disabled'));
+
+// ═══════════════════════════════════════
+// Step cmd
+// ═══════════════════════════════════════
+const NO_VAL=new Set(['left','right','neutral','cw','ccw','wait_pend',
+  'brakeon','brakeoff','softstarton','softstartoff','on','off','calibrate']);
+function onCmdChange(){
+  const c=document.getElementById('step-cmd').value;
+  const vi=document.getElementById('step-val');
+  vi.disabled=NO_VAL.has(c); vi.style.opacity=NO_VAL.has(c)?'0.3':'1';
+  const defaults={wait:500,angle:90,speed:2000,delay:500};
+  if(defaults[c]) vi.value=defaults[c];
+}
+onCmdChange();
+
+// ═══════════════════════════════════════
+// Sequence builder
+// ═══════════════════════════════════════
+function addStep(){
+  const c=document.getElementById('step-cmd').value;
+  const v=document.getElementById('step-val').value;
+  sequence.push(NO_VAL.has(c)?[c]:[c,isNaN(+v)?v:+v]);
+  renderSeq();
+}
+
+function addPattern(name){
+  const a=currentAngle,s=currentSpeed;
+  const P={
+    pendulum:[['on'],['softstarton'],['brakeon'],['speed',s],['angle',a],
+      ...Array(4).fill(0).flatMap(()=>[['left'],['wait',600],['right'],['wait',600]]),
+      ['neutral'],['off']],
+    buildup:[['on'],['speed',s],
+      ...[30,60,90,120,180].flatMap(ag=>[['angle',ag],['left'],['wait',700],['right'],['wait',700]]),
+      ['neutral'],['off']],
+    spin:[['on'],['speed',s],['cw'],['wait',3000],
+      ['speed',Math.round(s*0.4)],['ccw'],['wait',3000],['neutral'],['off']],
+    wave:[['on'],['softstarton'],['brakeon'],
+      ['speed',Math.round(s*0.3)],['angle',30],
+      ...Array(3).fill(0).flatMap(()=>[['left'],['wait',250],['right'],['wait',250]]),
+      ['speed',s],['angle',a],
+      ...Array(3).fill(0).flatMap(()=>[['left'],['wait',500],['right'],['wait',500]]),
+      ['neutral'],['off']]
+  };
+  sequence=[...sequence,...(P[name]||[])]; renderSeq();
+}
+
+function renderSeq(){
+  const el=document.getElementById('seq-list'); el.innerHTML='';
+  sequence.forEach(([c,v],i)=>{
+    const risk=timeline?.events[i]?.tangleRisk;
+    const div=document.createElement('div');
+    div.className='sitem'+(i===selectedIdx?' sel':'')+(risk?' risk':'');
+    div.innerHTML=`<span class="sn">${i+1}</span><span class="sc">${c}</span>
+      <span class="sv">${v!==undefined?v:''}</span>
+      <span class="sdel" onclick="removeStep(${i},event)">✕</span>`;
+    div.onclick=()=>{selectedIdx=i;renderSeq();};
+    el.appendChild(div);
+  });
+  const risks=timeline?.events.filter(e=>e.tangleRisk).length??0;
+  const dur=timeline?timeline.duration.toFixed(1)+'s':'—';
+  document.getElementById('seq-stats').textContent=
+    `${sequence.length} steps · ${dur}`+(risks?` · ⚠${risks}`:'');
+}
+
+function removeStep(i,e){
+  e.stopPropagation(); sequence.splice(i,1);
+  if(selectedIdx>=sequence.length) selectedIdx=sequence.length-1;
+  renderSeq();
+}
+function clearSeq(){
+  if(sequence.length&&!confirm('Clear sequence?')) return;
+  sequence=[];selectedIdx=-1;timeline=null;renderSeq();clearViz();
+}
+function moveUp(){
+  if(selectedIdx<1) return;
+  [sequence[selectedIdx-1],sequence[selectedIdx]]=[sequence[selectedIdx],sequence[selectedIdx-1]];
+  selectedIdx--;renderSeq();
+}
+function moveDn(){
+  if(selectedIdx<0||selectedIdx>=sequence.length-1) return;
+  [sequence[selectedIdx],sequence[selectedIdx+1]]=[sequence[selectedIdx+1],sequence[selectedIdx]];
+  selectedIdx++;renderSeq();
+}
+function dupStep(){
+  if(selectedIdx<0) return;
+  sequence.splice(selectedIdx+1,0,[...sequence[selectedIdx]]);renderSeq();
+}
+
+// ═══════════════════════════════════════
+// Preview — runs entirely in browser
+// ═══════════════════════════════════════
+function preview(){
+  if(!sequence.length) return;
+  timeline=simulate(sequence);
+  renderSeq(); drawTimeline(); startAnim();
+  const risks=timeline.events.filter(e=>e.tangleRisk).length;
+  document.getElementById('viz-info').textContent=
+    `${sequence.length} steps · ${timeline.duration.toFixed(1)}s`+
+    (risks?` · ⚠ ${risks} tangle risk${risks>1?'s':''}`:' · ✓ no risks');
+}
+
+// ═══════════════════════════════════════
+// Save / load — localStorage + Pi4
+// ═══════════════════════════════════════
+async function saveSeq(){
+  const name=(document.getElementById('seq-name').value.trim()||'untitled').replace(/[/\\]/g,'-');
+  const data={name,steps:sequence};
+  const local=JSON.parse(store.get('whip-seqs')||'{}');
+  local[name]=data; store.set('whip-seqs',JSON.stringify(local));
+  if(PI4) await fetch(`${PI4}/api/sequences`,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
+  loadLibrary();
+}
+
+async function loadLibrary(){
+  const el=document.getElementById('saved-list'); el.innerHTML='';
+  const local=JSON.parse(store.get('whip-seqs')||'{}');
+  let names=Object.keys(local);
+  if(PI4){
+    try{const r=await fetch(`${PI4}/api/sequences`);const remote=await r.json();
+      remote.forEach(n=>{if(!names.includes(n))names.push(n);});}catch{}
+  }
+  names.sort();
+  if(!names.length){
+    el.innerHTML='<div style="font-family:var(--mono);font-size:10px;color:var(--muted);padding:8px">No saved sequences yet.</div>';
+    return;
+  }
+  names.forEach(name=>{
+    const div=document.createElement('div'); div.className='saved-item';
+    div.innerHTML=`<span class="saved-name">${name}</span>
+      <div style="display:flex;gap:4px">
+        <div class="btn sm" onclick="loadSeq('${name}')">LOAD</div>
+        ${PI4?`<div class="btn sm accent live" onclick="runSeq('${name}')">▶ RUN</div>`:''}
+        <div class="btn sm red" onclick="deleteSeq('${name}')">✕</div>
+      </div>`;
+    el.appendChild(div);
+  });
+}
+
+async function loadSeq(name){
+  let data=null;
+  if(PI4){try{const r=await fetch(`${PI4}/api/sequences/${name}`);data=await r.json();}catch{}}
+  if(!data){const local=JSON.parse(store.get('whip-seqs')||'{}');data=local[name];}
+  if(!data) return;
+  sequence=data.steps||[]; document.getElementById('seq-name').value=name;
+  selectedIdx=-1;timeline=null;renderSeq();
+  document.querySelector('[data-tab="compose"]').click();
+}
+
+async function runSeq(name){
+  if(!PI4) return;
+  await fetch(`${PI4}/api/sequences/${name}/run`,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({loop:loopMode})});
+}
+
+async function deleteSeq(name){
+  if(!confirm(`Delete "${name}"?`)) return;
+  const local=JSON.parse(store.get('whip-seqs')||'{}');
+  delete local[name]; store.set('whip-seqs',JSON.stringify(local));
+  if(PI4) await fetch(`${PI4}/api/sequences/${name}`,{method:'DELETE'});
+  loadLibrary();
+}
+
+async function stopEngine(){if(PI4) await fetch(`${PI4}/api/stop`,{method:'POST'});}
+
+function exportJSON(){
+  const name=document.getElementById('seq-name').value.trim()||'sequence';
+  const blob=new Blob([JSON.stringify({name,steps:sequence},null,2)],{type:'application/json'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob);
+  a.download=`${name}.json`; a.click();
+}
+
+function importJSON(input){
+  const file=input.files[0]; if(!file) return;
+  const r=new FileReader();
+  r.onload=e=>{
+    try{const d=JSON.parse(e.target.result);sequence=d.steps||[];
+      document.getElementById('seq-name').value=d.name||'';
+      selectedIdx=-1;timeline=null;renderSeq();
+      document.querySelector('[data-tab="compose"]').click();
+    }catch{alert('Invalid JSON');}
+  };
+  r.readAsText(file);
+}
+
+// ═══════════════════════════════════════
+// Visualizer
+// ═══════════════════════════════════════
+const armCanvas=document.getElementById('arm-canvas');
+const armCtx=armCanvas.getContext('2d');
+const tlCanvas=document.getElementById('tl-canvas');
+const tlCtx=tlCanvas.getContext('2d');
+let chainHist=[], animId=null, animStart=null;
+
+function resizeCanvases(){
+  [armCanvas,tlCanvas].forEach(c=>{
+    const r=c.getBoundingClientRect();
+    c.width=r.width*devicePixelRatio; c.height=r.height*devicePixelRatio;
+  });
+}
+window.addEventListener('resize',()=>{resizeCanvases();drawArm(0);});
+// ResizeObserver is more reliable than setTimeout for Safari local files
+const _ro=new ResizeObserver(()=>{resizeCanvases();drawArm(armCanvas._lastDeg||0);});
+_ro.observe(document.getElementById('viz-wrap'));
+setTimeout(()=>{resizeCanvases();drawArm(0);},200);
+
+function drawArm(deg){
+  armCanvas._lastDeg=deg;
+  const c=armCtx,W=armCanvas.width,H=armCanvas.height,dpr=devicePixelRatio;
+  const cx=W/2,cy=H/2,scale=Math.min(W,H)*0.36;
+  c.clearRect(0,0,W,H);
+
+  // grid
+  c.strokeStyle='#1a1a2a'; c.lineWidth=1;
+  [0.35,0.7,1.0,1.35].forEach(r=>{c.beginPath();c.arc(cx,cy,scale*r,0,Math.PI*2);c.stroke();});
+  c.beginPath();c.moveTo(cx-W,cy);c.lineTo(cx+W,cy);c.moveTo(cx,cy-H);c.lineTo(cx,cy+H);c.stroke();
+
+  const rad=deg*Math.PI/180;
+  const tipX=cx+Math.sin(rad)*scale*0.72, tipY=cy-Math.cos(rad)*scale*0.72;
+  const ctrX=cx-Math.sin(rad)*scale*0.28, ctrY=cy+Math.cos(rad)*scale*0.28;
+
+  // chain ghost trail
+  if(chainHist.length>2){
+    c.beginPath();
+    chainHist.forEach((a,i)=>{
+      const r2=a*Math.PI/180;
+      const ex=cx+Math.sin(r2)*scale*1.22, ey=cy-Math.cos(r2)*scale*1.22;
+      i===0?c.moveTo(ex,ey):c.lineTo(ex,ey);
+    });
+    c.strokeStyle='rgba(252,92,124,0.1)';c.lineWidth=4*dpr;c.stroke();
+  }
+
+  // arm shadow
+  c.beginPath();c.moveTo(ctrX,ctrY);c.lineTo(tipX,tipY);
+  c.strokeStyle='#2a1a3a';c.lineWidth=10*dpr;c.lineCap='round';c.stroke();
+  // arm
+  c.beginPath();c.moveTo(ctrX,ctrY);c.lineTo(tipX,tipY);
+  c.strokeStyle='#7c5cfc';c.lineWidth=3.5*dpr;c.stroke();
+  // counterweight
+  c.beginPath();c.arc(ctrX,ctrY,7*dpr,0,Math.PI*2);
+  c.fillStyle='#3a2a5a';c.fill();c.strokeStyle='#7c5cfc';c.lineWidth=1.5*dpr;c.stroke();
+
+  // chain with lag
+  const lagDeg=chainHist.length>6?deg+(chainHist[chainHist.length-6]-deg)*0.55:deg;
+  const lr=lagDeg*Math.PI/180;
+  const cex=cx+Math.sin(lr)*scale*1.22, cey=cy-Math.cos(lr)*scale*1.22;
+  c.beginPath();c.moveTo(tipX,tipY);
+  c.quadraticCurveTo(tipX+(cex-tipX)*0.25,tipY+(cey-tipY)*0.65,cex,cey);
+  c.strokeStyle='#fc5c7c';c.lineWidth=2.5*dpr;
+  c.setLineDash([4*dpr,3*dpr]);c.stroke();c.setLineDash([]);
+  // tassel
+  c.beginPath();c.arc(cex,cey,5*dpr,0,Math.PI*2);c.fillStyle='#fc5c7c';c.fill();
+  // hub
+  c.beginPath();c.arc(cx,cy,9*dpr,0,Math.PI*2);
+  c.fillStyle='#1a1a2a';c.fill();c.strokeStyle='#5a5a9a';c.lineWidth=2*dpr;c.stroke();
+  // label
+  c.fillStyle='#7c5cfc';c.font=`${Math.round(12*dpr)}px JetBrains Mono,monospace`;
+  c.fillText(`${deg.toFixed(1)}°`,12*dpr,18*dpr);
+}
+
+function drawTimeline(markerT=0){
+  if(!timeline) return;
+  const c=tlCtx,W=tlCanvas.width,H=tlCanvas.height,dpr=devicePixelRatio;
+  c.clearRect(0,0,W,H);
+  const PAD=34*dpr,PW=W-PAD*2,PH=H-22*dpr,dur=timeline.duration||1;
+
+  let minA=-20,maxA=20;
+  timeline.events.forEach(e=>{if(e.type==='move'){minA=Math.min(minA,e.p0,e.p1);maxA=Math.max(maxA,e.p0,e.p1);}});
+  const pad=(maxA-minA)*0.12; minA-=pad; maxA+=pad;
+  const aR=maxA-minA;
+  const tx=t=>PAD+(t/dur)*PW, ay=a=>PH*0.05+PH*0.9*(1-(a-minA)/aR);
+
+  c.strokeStyle='#2a2a42';c.lineWidth=1;
+  c.beginPath();c.moveTo(PAD,ay(0));c.lineTo(PAD+PW,ay(0));c.stroke();
+
+  timeline.events.forEach(e=>{
+    if(e.type==='move'){
+      const col=e.tangleRisk?'#fc5c7c':(!e.braking&&!e.softstart)?'#fc9c4c':'#7c5cfc';
+      if(e.tangleRisk){c.fillStyle='rgba(252,92,124,0.07)';c.fillRect(tx(e.t0),0,tx(e.t1)-tx(e.t0),H);}
+      c.strokeStyle=col;c.lineWidth=e.tangleRisk?3:2;
+      c.beginPath();c.moveTo(tx(e.t0),ay(e.p0));c.lineTo(tx(e.t1),ay(e.p1));c.stroke();
+    }else if(e.type==='wait'||e.type==='wait_pend'){
+      c.strokeStyle='#3a3a5a';c.lineWidth=1.5;
+      c.setLineDash([3*dpr,3*dpr]);
+      c.beginPath();c.moveTo(tx(e.t0),ay(e.pos));c.lineTo(tx(e.t1),ay(e.pos));c.stroke();
+      c.setLineDash([]);
+    }
+  });
+
+  const step=dur<=10?1:dur<=30?5:10;
+  c.fillStyle='#5a5a7a';c.font=`${8*dpr}px JetBrains Mono,monospace`;
+  for(let tt=0;tt<=dur;tt+=step){
+    const x=tx(tt);
+    c.strokeStyle='#1e1e2e';c.lineWidth=1;c.beginPath();c.moveTo(x,0);c.lineTo(x,PH);c.stroke();
+    c.fillText(`${tt.toFixed(0)}s`,x-5*dpr,H-4*dpr);
+  }
+  if(markerT>0){c.strokeStyle='rgba(232,232,248,0.35)';c.lineWidth=1.5;
+    c.beginPath();c.moveTo(tx(markerT),0);c.lineTo(tx(markerT),H);c.stroke();}
+
+  [['#7c5cfc','smooth'],['#fc9c4c','sharp'],['#fc5c7c','⚠ tangle']].forEach(([col,lbl],i)=>{
+    c.fillStyle=col;c.fillRect(PAD+i*68*dpr,H-12*dpr,6*dpr,6*dpr);
+    c.fillStyle='#5a5a7a';c.fillText(lbl,PAD+i*68*dpr+8*dpr,H-5*dpr);
+  });
+}
+
+function startAnim(){
+  stopViz();chainHist=[];animStart=null;
+  function frame(ts){
+    if(!animStart) animStart=ts;
+    if(!timeline||!timeline.duration) return;
+    const loopT=((ts-animStart)/1000)%(timeline.duration+0.8);
+    let pos=0;
+    for(const e of timeline.events){
+      if(e.type==='move'){
+        if(loopT>=e.t0&&loopT<=e.t1){
+          const p=(loopT-e.t0)/Math.max(e.t1-e.t0,0.001);
+          const ease=p<0.5?2*p*p:1-Math.pow(-2*p+2,2)/2;
+          pos=e.p0+(e.p1-e.p0)*ease; break;
+        }else if(loopT>e.t1) pos=e.p1;
+      }else if((e.type==='wait'||e.type==='wait_pend')&&loopT>=e.t0&&loopT<=e.t1){
+        pos=e.pos??pos; break;
+      }
+    }
+    chainHist.push(pos);
+    if(chainHist.length>50) chainHist.shift();
+    drawArm(pos);
+    drawTimeline(Math.min(loopT,timeline.duration));
+    animId=requestAnimationFrame(frame);
+  }
+  animId=requestAnimationFrame(frame);
+}
+
+function stopViz(){if(animId){cancelAnimationFrame(animId);animId=null;}}
+function clearViz(){
+  stopViz();chainHist=[];
+  armCtx.clearRect(0,0,armCanvas.width,armCanvas.height);
+  tlCtx.clearRect(0,0,tlCanvas.width,tlCanvas.height);
+  document.getElementById('viz-info').textContent='No sequence loaded — build one in COMPOSE or import a JSON.';
+}
+function resetViz(){chainHist=[];drawArm(0);}
+
+// Safari blocks localStorage on file:// URLs — fall back to in-memory
+const store={
+  get(k){try{return store.get(k);}catch{return _mem[k]??null;}},
+  set(k,v){try{store.set(k,v);}catch{_mem[k]=v;}},
+};
+const _mem={};
+window.addEventListener('load',()=>{
+  resizeCanvases(); drawArm(0); loadLibrary();
+  const last=store.get('whip-pi4');
+  if(last) document.getElementById('pi4-input').value=last;
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,776 @@
+/*
+  Pico W 2 — JSS57 Stepper Web Controller (ACCELERATION VERSION)
+  - Trapezoidal motion profile with aggressive acceleration/deceleration
+  - Optimized for whip cracking with maximum energy transfer
+  - GP2=STEP (PUL+), GP3=DIR (DIR+), GP4=ENA (ENA+ optional), GP5=PEND (PEND+ input)
+*/
+
+#include <WiFi.h>
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <hardware/watchdog.h>
+#include <pico/bootrom.h>
+
+//
+// === HARDWARE CONFIG ===
+//
+const uint8_t STEP_PIN   = 2;   // PUL+ -> GP2
+const uint8_t DIR_PIN    = 3;   // DIR+ -> GP3
+const int8_t  ENABLE_PIN = 4;   // ENA+ -> GP4 (set -1 if ENA+ tied to 3.3V)
+const uint8_t PEND_PIN   = 5;   // PEND+ -> GP5 (input) ; PEND- -> GND
+
+// IMPORTANT: Set this based on your driver's enable logic
+// true = HIGH enables motor, false = LOW enables motor
+const bool ENABLE_ACTIVE_HIGH = false;  // JSS57 usually active-LOW
+
+//
+// === NETWORK (AP) ===
+//
+const char* ap_ssid     = "Pico-Stepper";
+
+//
+// === MOTOR / MOTION DEFAULTS ===
+//
+const int PULSES_PER_REV = 800;      // Set to your DIP microstep configuration (800, 1600, 3200, ...)
+int currentAngle = 45;               // default degrees for slider
+const int minAngle = 5, maxAngle = 360;
+
+int moveRange = 0;                   // computed from currentAngle
+
+// Speed and acceleration parameters
+int minSpeed = 200;                  // Starting speed (steps/sec) - increased from 50
+int maxSpeed = 4000;                 // Maximum cruise speed (steps/sec)
+int currentSpeed = 2000;             // Target max speed
+
+// Acceleration settings (steps/sec²)
+// These will be calculated based on speed and angle
+int acceleration = 3000;             
+int deceleration = 6000;             
+int minAccel = 500, maxAccel = 20000;
+int minDecel = 500, maxDecel = 30000;
+
+// Acceleration multipliers (user adjustable)
+float accelMultiplier = 1.0;    // 0.5 to 3.0 range
+float decelMultiplier = 2.0;    // 0.5 to 5.0 range (higher for sharper whip crack)
+
+bool autoScaleAccel = true;     // Auto-calculate accel based on angle/speed
+
+bool enableAccelDecel = true;        // Master toggle for acceleration profile
+
+unsigned long pendulumDelay = 250;   // ms pause at endpoints
+bool disableMotorAtRest = false;     // disable motor during pendulum rest (user option)
+
+//
+// === STATE ===
+//
+String logBuffer = "";
+const int MAX_LOG_LINES = 300;
+
+volatile long currentPosition = 0;   // step counter (software-only)
+volatile bool motorEnabled = false;
+
+bool pendulumMode = true;
+long currentTarget = 0;
+bool goingRight = true;
+bool pendulumInitialized = false;
+unsigned long positionReachedTime = 0;
+bool positionJustReached = false;
+bool motorWasDisabledAtRest = false;
+
+//
+// === STEPPER ENGINE (with acceleration/deceleration) ===
+//
+volatile long stepsRemaining = 0;
+volatile bool stepDir = 0;
+volatile unsigned long stepIntervalMicros = 1000;
+const unsigned int STEP_PULSE_WIDTH_US = 4;
+volatile bool stepPulseInProgress = false;
+volatile unsigned long nextStepTime = 0;
+
+// Acceleration profile tracking
+volatile long totalSteps = 0;           // Total steps in current move
+volatile long stepsTaken = 0;           // Steps completed so far
+volatile float currentSpeedFloat = 0.0; // Current speed (float for smooth ramping)
+volatile long accelSteps = 0;           // Steps needed to accelerate to max speed
+volatile long decelSteps = 0;           // Steps needed to decelerate to min speed
+
+//
+// === WEB SERVER ===
+//
+WebServer server(80);
+DNSServer dnsServer;
+const byte DNS_PORT = 53;
+
+//
+// === UTILITIES (Forward declarations) ===
+//
+void appendLog(const String &m);
+
+//
+// === BOOTSEL BUTTON ===
+//
+unsigned long lastBootselCheck = 0;
+const unsigned long BOOTSEL_CHECK_INTERVAL = 100;
+
+void checkBootselButton() {
+  static unsigned long bootselPressStart = 0;
+  static bool wasPressed = false;
+  bool isPressed = false;
+  #ifdef BOOTSEL
+    isPressed = (BOOTSEL) ? true : false;
+  #endif
+
+  if (isPressed && !wasPressed) {
+    bootselPressStart = millis();
+    wasPressed = true;
+  } else if (!isPressed && wasPressed) {
+    wasPressed = false;
+  } else if (isPressed && wasPressed) {
+    if (millis() - bootselPressStart > 500) {
+      appendLog("BOOTSEL held - RESTARTING...");
+      delay(100);
+      watchdog_reboot(0, 0, 0);
+      while (1);
+    }
+  }
+}
+
+//
+// === UTILITIES ===
+//
+void appendLog(const String &m) {
+  Serial.println(m);
+  logBuffer += m + "\n";
+  int lines = 0;
+  for (int i = 0; i < (int)logBuffer.length(); ++i) if (logBuffer[i] == '\n') lines++;
+  while (lines > MAX_LOG_LINES) {
+    int idx = logBuffer.indexOf('\n');
+    if (idx >= 0) {
+      logBuffer = logBuffer.substring(idx + 1);
+      lines--;
+    } else break;
+  }
+}
+
+long angleToSteps(float angle) {
+  float perDeg = float(PULSES_PER_REV) / 360.0f;
+  return (long)round(angle * perDeg);
+}
+
+void updateMoveRangeFromAngle() {
+  moveRange = (int)angleToSteps((float)currentAngle);
+  appendLog("🎯 Angle: " + String(currentAngle) + "° → ±" + String(moveRange) + " steps");
+}
+
+unsigned long speedToIntervalMicros(float stepsPerSec) {
+  if (stepsPerSec <= minSpeed) stepsPerSec = minSpeed;
+  double s = 1.0 / (double)stepsPerSec;
+  return (unsigned long)round(s * 1e6);
+}
+
+//
+// === DRIVER ENABLE/STATE ===
+//
+void setMotorEnabled(bool on) {
+  motorEnabled = on;
+  if (ENABLE_PIN >= 0) {
+    bool pinState = ENABLE_ACTIVE_HIGH ? on : !on;
+    digitalWrite(ENABLE_PIN, pinState ? HIGH : LOW);
+  }
+  appendLog(String(on ? "✓ MOTOR ON" : "✓ MOTOR OFF"));
+}
+
+//
+// === ACCELERATION CALCULATIONS ===
+//
+void calculateAccelProfile(long steps) {
+  if (!enableAccelDecel) {
+    accelSteps = 0;
+    decelSteps = 0;
+    return;
+  }
+  
+  // Auto-scale acceleration based on distance and speed if enabled
+  if (autoScaleAccel) {
+    // Target: use about 25% of distance for accel, 15% for decel (asymmetric for whip effect)
+    // Formula: a = v² / (2 * distance_fraction)
+    float vMax = (float)currentSpeed;
+    float vMin = (float)minSpeed;
+    float distance = (float)steps;
+    
+    // Calculate ideal acceleration to use ~25% of distance
+    float idealAccel = (vMax * vMax - vMin * vMin) / (2.0f * distance * 0.25f);
+    acceleration = (int)(idealAccel * accelMultiplier);
+    acceleration = constrain(acceleration, minAccel, maxAccel);
+    
+    // Deceleration uses multiplier for whip crack effect (typically 2x or more)
+    deceleration = (int)(acceleration * decelMultiplier);
+    deceleration = constrain(deceleration, minDecel, maxDecel);
+    
+    appendLog("Auto accel: " + String(acceleration) + " decel: " + String(deceleration));
+  }
+  
+  // Calculate steps needed to accelerate from minSpeed to maxSpeed
+  // Using: v² = u² + 2as, where steps = (v² - u²) / (2a)
+  float vMax = (float)currentSpeed;
+  float vMin = (float)minSpeed;
+  float accel = (float)acceleration;
+  float decel = (float)deceleration;
+  
+  accelSteps = (long)((vMax * vMax - vMin * vMin) / (2.0f * accel));
+  decelSteps = (long)((vMax * vMax - vMin * vMin) / (2.0f * decel));
+  
+  // If total distance is too short for full accel + decel, scale down
+  if (accelSteps + decelSteps > steps) {
+    float ratio = (float)steps / (float)(accelSteps + decelSteps);
+    accelSteps = (long)(accelSteps * ratio);
+    decelSteps = (long)(decelSteps * ratio);
+  }
+}
+
+//
+// === SCHEDULING ===
+//
+void scheduleSteps(long steps) {
+  if (steps == 0) return;
+
+  if (!motorEnabled) {
+    appendLog("scheduleSteps: Motor disabled, enabling...");
+    setMotorEnabled(true);
+    delay(10);
+  }
+
+  noInterrupts();
+  if (steps > 0) {
+    stepDir = 0;
+    stepsRemaining = steps;
+  } else {
+    stepDir = 1;
+    stepsRemaining = -steps;
+  }
+
+  totalSteps = stepsRemaining;
+  stepsTaken = 0;
+  currentSpeedFloat = (float)minSpeed;
+  
+  // Calculate acceleration profile
+  calculateAccelProfile(totalSteps);
+  
+  stepIntervalMicros = speedToIntervalMicros(currentSpeedFloat);
+  nextStepTime = micros();
+  interrupts();
+  
+  appendLog("Accel: " + String(accelSteps) + " Cruise: " + String(totalSteps - accelSteps - decelSteps) + " Decel: " + String(decelSteps));
+}
+
+void smartMoveTo(long target) {
+  if (!motorEnabled) {
+    appendLog("Motor was disabled — enabling for move");
+    setMotorEnabled(true);
+    delay(2);
+  }
+
+  long delta = target - currentPosition;
+  if (delta == 0) return;
+  appendLog("→ Scheduling " + String(delta) + " steps to target " + String(target));
+  scheduleSteps(delta);
+}
+
+void emergencyStop() {
+  noInterrupts();
+  stepsRemaining = 0;
+  interrupts();
+  appendLog("*** EMERGENCY STOP ***");
+}
+
+//
+// === WEB HANDLERS ===
+//
+void handleRoot();
+void handleLog() { server.send(200, "text/plain", logBuffer); }
+
+void handleCmd() {
+  if (!server.hasArg("c")) { server.send(400, "text/plain", "missing cmd"); return; }
+  String cmd = server.arg("c");
+  cmd.toLowerCase(); cmd.trim();
+  appendLog("> " + cmd);
+
+  if (cmd == "help" || cmd == "h") {
+    appendLog("Commands: left,right,neutral,on,off,stop,pend,config,accel <n>,decel <n>,accelmult <n>,decelmult <n>,autoaccelon,autoacceloff,set90,set180,accelon,acceloff");
+    server.send(200, "text/plain", "OK"); return;
+  }
+  if (cmd == "on") { setMotorEnabled(true); server.send(200, "text/plain", "OK"); return; }
+  if (cmd == "off") { setMotorEnabled(false); pendulumMode=false; server.send(200, "text/plain", "OK"); return; }
+  if (cmd == "stop") { emergencyStop(); server.send(200, "text/plain", "OK"); return; }
+
+  if (cmd == "left") {
+    if (!motorEnabled) { appendLog("Motor disabled"); server.send(200,"text/plain","disabled"); return;}
+    currentTarget = moveRange; appendLog("LEFT -> "+String(currentTarget)); smartMoveTo(currentTarget); server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "right") {
+    if (!motorEnabled) { appendLog("Motor disabled"); server.send(200,"text/plain","disabled"); return;}
+    currentTarget = -moveRange; appendLog("RIGHT -> "+String(currentTarget)); smartMoveTo(currentTarget); server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "neutral") {
+    if (!motorEnabled) { appendLog("Motor disabled"); server.send(200,"text/plain","disabled"); return;}
+    appendLog("NEUTRAL -> 0"); smartMoveTo(0); server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "pend") {
+    if (!motorEnabled) { appendLog("Motor disabled"); server.send(200,"text/plain","disabled"); return;}
+    pendulumMode = !pendulumMode;
+    pendulumInitialized = false;
+    appendLog(String(pendulumMode ? "PENDULUM ON" : "PENDULUM OFF"));
+    server.send(200,"text/plain","OK"); return;
+  }
+
+  if (cmd.startsWith("speed ")) {
+    int v = cmd.substring(6).toInt();
+    currentSpeed = constrain(v, minSpeed, maxSpeed);
+    appendLog("Max Speed: " + String(currentSpeed));
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("accel ")) {
+    int v = cmd.substring(6).toInt();
+    acceleration = constrain(v, minAccel, maxAccel);
+    appendLog("Acceleration: " + String(acceleration) + " steps/s²");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("decel ")) {
+    int v = cmd.substring(6).toInt();
+    deceleration = constrain(v, minDecel, maxDecel);
+    appendLog("Deceleration: " + String(deceleration) + " steps/s²");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "accelon") {
+    enableAccelDecel = true;
+    appendLog("Acceleration/Deceleration ENABLED");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "acceloff") {
+    enableAccelDecel = false;
+    appendLog("Acceleration/Deceleration DISABLED (instant speed)");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "autoaccelon") {
+    autoScaleAccel = true;
+    appendLog("Auto-scaling acceleration ENABLED (adjusts to angle/speed)");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "autoacceloff") {
+    autoScaleAccel = false;
+    appendLog("Auto-scaling acceleration DISABLED (manual control)");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("accelmult ")) {
+    float v = cmd.substring(10).toFloat();
+    accelMultiplier = constrain(v, 0.5, 3.0);
+    appendLog("Accel multiplier: " + String(accelMultiplier) + "x");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("decelmult ")) {
+    float v = cmd.substring(10).toFloat();
+    decelMultiplier = constrain(v, 0.5, 5.0);
+    appendLog("Decel multiplier: " + String(decelMultiplier) + "x (relative to accel)");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("angle ")) {
+    int v = cmd.substring(6).toInt();
+    currentAngle = constrain(v, minAngle, maxAngle);
+    updateMoveRangeFromAngle();
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("delay ")) {
+    int v = cmd.substring(6).toInt();
+    pendulumDelay = constrain(v, 0, 5000);
+    appendLog("Pendulum delay: " + String(pendulumDelay) + "ms");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "restoff") {
+    disableMotorAtRest = false;
+    appendLog("Motor stays ON during rest");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "reston") {
+    disableMotorAtRest = true;
+    appendLog("Motor disables during rest");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("move ")) {
+    if (!motorEnabled) { appendLog("Motor disabled - enabling..."); setMotorEnabled(true); }
+    long pos = cmd.substring(5).toInt();
+    appendLog("Move to: " + String(pos));
+    smartMoveTo(pos);
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd.startsWith("offset ")) {
+    if (!motorEnabled) { appendLog("Motor disabled - enabling..."); setMotorEnabled(true); }
+    long off = cmd.substring(7).toInt();
+    long newt = currentPosition + off;
+    appendLog("Offset " + String(off) + " -> " + String(newt));
+    smartMoveTo(newt);
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "calibrate") {
+    appendLog("Calibrate: shifting coordinate so current position becomes 0.");
+    long shift = currentPosition;
+    currentPosition = 0;
+    currentTarget -= shift;
+    appendLog("Calibrated. Current == 0.");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "set90") {
+    currentAngle = 90;
+    updateMoveRangeFromAngle();
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "set180") {
+    currentAngle = 180;
+    updateMoveRangeFromAngle();
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "setneutral") {
+    appendLog("Setting current position as new neutral (0)");
+    long shift = currentPosition;
+    currentPosition = 0;
+    currentTarget -= shift;
+    appendLog("New neutral set. Current position is now 0.");
+    server.send(200,"text/plain","OK"); return;
+  }
+  if (cmd == "config") {
+    appendLog("=== CONFIG ===");
+    appendLog("moveRange: " + String(moveRange));
+    appendLog("angle: " + String(currentAngle));
+    appendLog("maxSpeed: " + String(currentSpeed));
+    appendLog("minSpeed: " + String(minSpeed));
+    appendLog("autoScaleAccel: " + String(autoScaleAccel ? "ON" : "OFF"));
+    if (autoScaleAccel) {
+      appendLog("accelMultiplier: " + String(accelMultiplier) + "x");
+      appendLog("decelMultiplier: " + String(decelMultiplier) + "x");
+    } else {
+      appendLog("acceleration: " + String(acceleration) + " steps/s²");
+      appendLog("deceleration: " + String(deceleration) + " steps/s²");
+    }
+    appendLog("accelEnabled: " + String(enableAccelDecel ? "ON" : "OFF"));
+    appendLog("pendulumDelay: " + String(pendulumDelay) + "ms");
+    appendLog("disableMotorAtRest: " + String(disableMotorAtRest ? "ON" : "OFF"));
+    appendLog("motorEnabled: " + String(motorEnabled ? "ON" : "OFF"));
+    appendLog("================");
+    server.send(200,"text/plain","OK"); return;
+  }
+
+  appendLog("Unknown cmd: " + cmd);
+  server.send(200,"text/plain","Unknown");
+}
+
+//
+// === STEPPER TICK (with acceleration/deceleration) ===
+//
+void stepperTick() {
+  unsigned long now = micros();
+
+  if (stepPulseInProgress) {
+    if (now >= nextStepTime) {
+      digitalWrite(STEP_PIN, LOW);
+      stepPulseInProgress = false;
+      nextStepTime = now + (stepIntervalMicros - STEP_PULSE_WIDTH_US);
+    }
+    return;
+  }
+
+  if (stepsRemaining > 0 && now >= nextStepTime) {
+    // Calculate current speed based on position in move
+    if (enableAccelDecel) {
+      if (stepsTaken < accelSteps) {
+        // ACCELERATION PHASE
+        float progress = (float)stepsTaken / (float)accelSteps;
+        currentSpeedFloat = minSpeed + (currentSpeed - minSpeed) * progress;
+      } 
+      else if (stepsRemaining <= decelSteps) {
+        // DECELERATION PHASE - very aggressive for whip crack
+        float progress = (float)stepsRemaining / (float)decelSteps;
+        currentSpeedFloat = minSpeed + (currentSpeed - minSpeed) * progress;
+      } 
+      else {
+        // CRUISE PHASE
+        currentSpeedFloat = (float)currentSpeed;
+      }
+    } else {
+      // No acceleration - instant max speed
+      currentSpeedFloat = (float)currentSpeed;
+    }
+
+    // Set direction & pulse
+    digitalWrite(DIR_PIN, stepDir ? HIGH : LOW);
+    digitalWrite(STEP_PIN, HIGH);
+    stepPulseInProgress = true;
+    nextStepTime = now + STEP_PULSE_WIDTH_US;
+
+    // Update position counters
+    if (stepDir == 0) currentPosition++;
+    else currentPosition--;
+    stepsRemaining--;
+    stepsTaken++;
+    
+    // Calculate interval for next step
+    stepIntervalMicros = speedToIntervalMicros(currentSpeedFloat);
+  }
+}
+
+//
+// === SETUP / LOOP ===
+//
+void setupPins() {
+  pinMode(STEP_PIN, OUTPUT); digitalWrite(STEP_PIN, LOW);
+  pinMode(DIR_PIN, OUTPUT);  digitalWrite(DIR_PIN, LOW);
+  if (ENABLE_PIN >= 0) {
+    pinMode(ENABLE_PIN, OUTPUT);
+    digitalWrite(ENABLE_PIN, ENABLE_ACTIVE_HIGH ? LOW : HIGH);
+  }
+  pinMode(PEND_PIN, INPUT_PULLUP);
+}
+
+void setup() {
+  Serial.begin(115200);
+  delay(200);
+  appendLog("=== PicoW Stepper Controller (ACCELERATION) ===");
+
+  setupPins();
+  updateMoveRangeFromAngle();
+
+  WiFi.softAP(ap_ssid);
+  IPAddress ip = WiFi.softAPIP();
+  appendLog("AP started: " + String(ap_ssid) + " (OPEN) IP: " + ip.toString());
+
+  dnsServer.start(DNS_PORT, "*", ip);
+  appendLog("Captive portal DNS started");
+
+  server.on("/", handleRoot);
+  server.on("/log", handleLog);
+  server.on("/cmd", handleCmd);
+  server.on("/generate_204", handleRoot);
+  server.on("/fwlink", handleRoot);
+  server.on("/hotspot-detect.html", handleRoot);
+  server.on("/connecttest.txt", handleRoot);
+  server.on("/success.txt", handleRoot);
+  
+  server.onNotFound([]() {
+    server.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    server.sendHeader("Pragma", "no-cache");
+    server.sendHeader("Expires", "-1");
+    server.sendHeader("Location", "http://192.168.4.1/", true);
+    server.send(302, "text/plain", "Redirecting to captive portal");
+  });
+  server.begin();
+  appendLog("Web server started");
+
+  setMotorEnabled(false);
+  appendLog("Ready. Connect to WiFi - portal opens automatically!");
+  appendLog("Or open http://192.168.4.1 manually");
+}
+
+void loop() {
+  dnsServer.processNextRequest();
+  server.handleClient();
+  stepperTick();
+
+  if (millis() - lastBootselCheck >= BOOTSEL_CHECK_INTERVAL) {
+    lastBootselCheck = millis();
+    checkBootselButton();
+  }
+
+  bool pendActive = (digitalRead(PEND_PIN) == LOW);
+
+  if (pendulumMode) {
+    if (!pendulumInitialized && motorEnabled) {
+      currentTarget = moveRange;
+      goingRight = true;
+      pendulumInitialized = true;
+      motorWasDisabledAtRest = false;
+      appendLog("→ Pendulum start to RIGHT: " + String(currentTarget));
+      smartMoveTo(currentTarget);
+    }
+
+    if (pendulumInitialized) {
+      long distance = abs(currentPosition - currentTarget);
+      bool atTarget = (distance <= 2) || pendActive;
+
+      if (atTarget && stepsRemaining == 0) {
+        if (!positionJustReached) {
+          positionReachedTime = millis();
+          positionJustReached = true;
+          appendLog("Target reached. Position: " + String(currentPosition) + " Target: " + String(currentTarget));
+          if (disableMotorAtRest && motorEnabled && !motorWasDisabledAtRest) {
+            setMotorEnabled(false);
+            motorWasDisabledAtRest = true;
+          }
+        } else if (millis() - positionReachedTime >= pendulumDelay) {
+          if (motorWasDisabledAtRest) {
+            appendLog("Rest period over, re-enabling motor for next swing");
+            setMotorEnabled(true);
+            delay(10);
+            motorWasDisabledAtRest = false;
+          }
+          
+          if (motorEnabled) {
+            if (goingRight) currentTarget = -moveRange;
+            else currentTarget = moveRange;
+            goingRight = !goingRight;
+            positionJustReached = false;
+            appendLog(String(goingRight ? "→ Moving RIGHT: " : "← Moving LEFT: ") + String(currentTarget));
+            smartMoveTo(currentTarget);
+          }
+        }
+      }
+    }
+  }
+
+  delay(0);
+}
+
+//
+// === WEB UI ===
+//
+void handleRoot() {
+  const char *html = R"rawliteral(
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Pico Stepper</title>
+  <style>
+    :root{--accent:#7c4dff;--bg:#0b0b12;--muted:#a99bd1}
+    body{margin:0;font-family:Inter,system-ui,Arial;background:var(--bg);color:#fff}
+    .wrap{max-width:900px;margin:18px auto;padding:18px}
+    header{display:flex;align-items:center;gap:12px}
+    h1{margin:0;font-size:1.25rem;color:var(--accent)}
+    .card{background:#0f0f15;border-radius:12px;padding:12px;margin-top:12px;box-shadow:0 6px 20px rgba(0,0,0,.6)}
+    .row{display:flex;gap:8px;flex-wrap:wrap}
+    button{background:var(--accent);border:none;color:#fff;padding:10px 12px;border-radius:8px;cursor:pointer}
+    button.ghost{background:transparent;border:1px solid #2a2540;color:var(--muted)}
+    button:active{transform:scale(0.95)}
+    .log{height:220px;background:#05050a;border-radius:8px;padding:10px;overflow:auto;font-family:monospace;font-size:13px}
+    .controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-top:10px}
+    label{font-size:12px;color:var(--muted);display:block;margin-bottom:6px}
+    input[type=range]{width:100%}
+    .small{font-size:12px;color:var(--muted)}
+    footer{margin-top:12px;color:var(--muted);font-size:12px}
+    .status{padding:8px;background:#1a1a2e;border-radius:6px;margin-bottom:8px;font-size:13px}
+    .accel-info{background:#1a2e1a;padding:8px;border-radius:6px;margin-top:8px;font-size:11px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header><h1>Pico Stepper Controller (Acceleration)</h1></header>
+
+    <div class="card">
+      <div class="status">
+        <strong>Status:</strong> Motor must be <strong>ENABLED</strong> to move!<br>
+        <small>Press BOOTSEL button on Pico for >500ms to restart (if supported)</small>
+      </div>
+      
+      <div class="row">
+        <div style="flex:1">
+          <div class="log" id="log">Loading log...</div>
+        </div>
+        <div style="width:320px">
+          <div class="controls">
+            <button onclick="cmd('on')" style="background:#4caf50">Enable Motor</button>
+            <button onclick="cmd('off')" class="ghost">Disable Motor</button>
+            <button onclick="cmd('stop')" style="background:#ff3860">EMERGENCY STOP</button>
+            <button onclick="cmd('left')">LEFT</button>
+            <button onclick="cmd('right')">RIGHT</button>
+            <button onclick="cmd('neutral')">NEUTRAL</button>
+            <button onclick="cmd('pend')">Toggle Pendulum</button>
+          </div>
+
+          <div style="margin-top:12px">
+            <div style="display:flex;gap:8px;margin-bottom:8px">
+              <button onclick="setAngle(90)">Set 90°</button>
+              <button onclick="setAngle(180)">Set 180°</button>
+            </div>
+            <div style="margin-bottom:8px">
+              <button onclick="cmd('setneutral')" style="width:100%;background:#ff9800">Set Current as Neutral</button>
+            </div>
+
+            <label>Max Speed: <span id="speedVal"></span> sps</label>
+            <input id="speed" type="range" min="200" max="4000" value="2000" oninput="updateSpeed(this.value)">
+            
+            <label>Accel Intensity: <span id="accelVal"></span>x (gentler ← → faster)</label>
+            <input id="accel" type="range" min="0.5" max="3.0" step="0.1" value="1.0" oninput="updateAccelMult(this.value)">
+            
+            <label>Decel Intensity: <span id="decelVal"></span>x (whip crack!)</label>
+            <input id="decel" type="range" min="0.5" max="5.0" step="0.1" value="2.0" oninput="updateDecelMult(this.value)">
+            
+            <label>Angle: <span id='angleVal'></span> deg</label>
+            <input id="angle" type="range" min="5" max="360" value="45" oninput="updateAngle(this.value)">
+            
+            <label>Rest Time: <span id='delayVal'></span> ms</label>
+            <input id="delay" type="range" min="0" max="5000" step="50" value="250" oninput="updateDelay(this.value)">
+            
+            <div style="margin-top:8px">
+              <label style="display:inline;margin-right:10px">
+                <input type="checkbox" id="restToggle" onchange="toggleRest(this.checked)"> Disable motor at rest
+              </label>
+              <label style="display:inline">
+                <input type="checkbox" id="accelToggle" checked onchange="toggleAccel(this.checked)"> Enable accel/decel
+              </label>
+              <label style="display:inline;margin-left:10px">
+                <input type="checkbox" id="autoToggle" checked onchange="toggleAuto(this.checked)"> Auto-scale
+              </label>
+            </div>
+            
+            <div class="accel-info">
+              💡 <strong>Auto-scaling ON:</strong> Acceleration adjusts to angle/speed automatically!<br>
+              • Accel intensity: 0.5x=gentle, 1.0x=balanced, 3.0x=aggressive<br>
+              • Decel intensity: Higher = sharper whip crack (try 2.0-4.0x)<br>
+              • Decel is relative to accel (2.0x = twice as fast stop)<br>
+              • Turn off auto-scale for manual control
+            </div>
+            
+            <div style="margin-top:8px">
+              <input id="cmdtext" style="width:66%;padding:8px;border-radius:6px;border:1px solid #222;background:#07070b;color:#fff" placeholder="raw command">
+              <button onclick="sendManual()">Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <footer>
+        Connect to <strong>Pico-Stepper</strong> WiFi (OPEN). Open <strong>http://192.168.4.1</strong><br>
+        <small>Wiring: GP2=STEP, GP3=DIR, GP4=ENA, GP5=PEND</small>
+      </footer>
+    </div>
+  </div>
+
+<script>
+function refreshLog(){ fetch('/log').then(r=>r.text()).then(t=>{document.getElementById('log').textContent=t;document.getElementById('log').scrollTop=1e9;});}
+function cmd(c){ fetch('/cmd?c='+encodeURIComponent(c)).then(()=>setTimeout(refreshLog,120)); }
+function sendManual(){ let v=document.getElementById('cmdtext').value; if(!v) return; cmd(v); document.getElementById('cmdtext').value=''; }
+function updateSpeed(v){ document.getElementById('speedVal').textContent=v; fetch('/cmd?c='+encodeURIComponent('speed '+v)); }
+function updateAccelMult(v){ document.getElementById('accelVal').textContent=parseFloat(v).toFixed(1); fetch('/cmd?c='+encodeURIComponent('accelmult '+v)); }
+function updateDecelMult(v){ document.getElementById('decelVal').textContent=parseFloat(v).toFixed(1); fetch('/cmd?c='+encodeURIComponent('decelmult '+v)); }
+function updateAngle(v){ document.getElementById('angleVal').textContent=v; fetch('/cmd?c='+encodeURIComponent('angle '+v)); }
+function updateDelay(v){ document.getElementById('delayVal').textContent=v; fetch('/cmd?c='+encodeURIComponent('delay '+v)); }
+function toggleRest(checked){ cmd(checked ? 'reston' : 'restoff'); }
+function toggleAccel(checked){ cmd(checked ? 'accelon' : 'acceloff'); }
+function toggleAuto(checked){ cmd(checked ? 'autoaccelon' : 'autoacceloff'); }
+function setAngle(deg){ 
+  document.getElementById('angle').value = deg; 
+  document.getElementById('angleVal').textContent = deg; 
+  fetch('/cmd?c='+encodeURIComponent('angle '+deg)).then(()=>setTimeout(refreshLog,120)); 
+}
+setInterval(refreshLog,500);
+window.onload=function(){ 
+  refreshLog(); 
+  document.getElementById('speedVal').textContent=document.getElementById('speed').value; 
+  document.getElementById('accelVal').textContent=parseFloat(document.getElementById('accel').value).toFixed(1); 
+  document.getElementById('decelVal').textContent=parseFloat(document.getElementById('decel').value).toFixed(1); 
+  document.getElementById('angleVal').textContent=document.getElementById('angle').value; 
+  document.getElementById('delayVal').textContent=document.getElementById('delay').value; 
+}
+</script>
+</body>
+</html>
+)rawliteral";
+  server.send(200, "text/html", html);
+}
