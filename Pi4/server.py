@@ -50,7 +50,7 @@ SEQUENCES_DIR.mkdir(exist_ok=True)
 
 # Name of a sequence in SEQUENCES_DIR to run automatically on boot (loop mode).
 # Set to "" to disable. Create the sequence from the UI and save it to the Pi.
-AUTOSTART_SEQ   = "autostart"
+AUTOSTART_SEQ   = ""
 
 PULSES_PER_REV = 400
 GEAR_RATIO     = 5.0
@@ -99,6 +99,7 @@ class CameraManager:
                     ["rpicam-vid", "-t", "0", "--inline",
                      "--width", str(width), "--height", str(height),
                      "--framerate", str(fps), "--codec", "mjpeg",
+                     "--hflip", "--vflip",
                      "--nopreview", "-o", "-"],
                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
                 )
@@ -141,7 +142,7 @@ class CameraManager:
             encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
             while self.running:
                 try:
-                    if hasattr(self, "_picam"):
+                    if self._picam is not None:
                         rgb = self._picam.capture_array()
                         frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
                     else:
@@ -149,6 +150,7 @@ class CameraManager:
                         if not ret:
                             time.sleep(0.05)
                             continue
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
                     _, buf = cv2.imencode(".jpg", frame, encode_params)
                     with self._lock:
                         self._frame = buf.tobytes()
@@ -160,7 +162,7 @@ class CameraManager:
     def stop(self):
         self.running = False
         if self._proc:
-            self._proc.terminate()
+            self._proc.kill()
             self._proc = None
 
     def get_frame(self):
@@ -616,6 +618,10 @@ class Handler(BaseHTTPRequestHandler):
                 # otherwise it immediately re-issues movement commands
                 if cmd.lower() in ("stop", "off", "reset"):
                     engine.stop()
+                    # flush_and_stop sends "stop" — also forward off/reset to Pico
+                    if cmd.lower() in ("off", "reset"):
+                        time.sleep(0.05)
+                        serial_mgr.send(cmd)
                 else:
                     serial_mgr.send(cmd)
             self.send_json({"ok": True})
@@ -709,7 +715,7 @@ async def main():
         else:
             print(f"Autostart: no sequence named '{AUTOSTART_SEQ}' found — skipping")
 
-    camera_mgr.start()
+    camera_mgr.start(width=1640, height=1232)
 
     httpd = ThreadedHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

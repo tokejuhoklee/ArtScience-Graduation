@@ -30,7 +30,7 @@ int drivingTeeth = 1;
 int drivenTeeth = 5;
 float gearReduction = 5.0;
 
-int currentAngle = 90;
+int currentAngle = 100;
 const int minAngle = 5, maxAngle = 170;
 int moveRange = 0;
 
@@ -338,12 +338,14 @@ void handleSerialCommands() {
         else if (cmd.startsWith("move ")) {
           if (!motorEnabled) { setMotorEnabled(true); }
           long pos = cmd.substring(5).toInt();
+          pos = constrain(pos, -moveRange, moveRange);
           smartMoveTo(pos);
         }
         else if (cmd.startsWith("offset ")) {
           if (!motorEnabled) { setMotorEnabled(true); }
           long off = cmd.substring(7).toInt();
-          smartMoveTo(currentPosition + off);
+          long target = constrain(currentPosition + off, -moveRange, moveRange);
+          smartMoveTo(target);
         }
         else if (cmd == "brakeon") { 
           enableBraking = true; 

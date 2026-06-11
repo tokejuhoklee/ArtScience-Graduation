@@ -637,7 +637,7 @@ const mkBlk = (type,extra={}) => ({
 export default function App() {
   // globals
   const [speed,     setSpeed]     = useState(2000);
-  const [angle,     setAngle]     = useState(90);
+  const [angle,     setAngle]     = useState(100);
   const [restMs,    setRestMs]    = useState(500);
   const [brk,       setBrk]       = useState(true);
   const [soft,      setSoft]      = useState(true);
