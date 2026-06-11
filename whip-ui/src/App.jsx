@@ -138,6 +138,7 @@ function expandBlock(blk, G, pos0) {
 function compileToSteps(blocks, G) {
   const out = [
     ["stop"],
+    ["calibrate"],   // re-zero position: arm assumed at gravity rest after stop
     ["on"],
     ["loop_start"],  // server restarts from here on subsequent loop iterations
   ];
@@ -590,7 +591,7 @@ function BlockCard({blk,colIdx,selected,hasRisk,G,onSelect,onRemove,onChange}) {
                 </Btn>
               ))}
             </div>
-            {blk.angle!=null&&<Slider label="Angle" value={blk.angle} min={5} max={360} step={5}
+            {blk.angle!=null&&<Slider label="Angle" value={blk.angle} min={5} max={170} step={5}
               fmt={v=>`${v}°`} onChange={v=>upd({angle:v})}/>}
             {blk.speed!=null&&<Slider label="Speed start" value={blk.speed} min={100} max={3000} step={100}
               fmt={v=>`${v} sps`} onChange={v=>upd({speed:v})}/>}
@@ -919,7 +920,7 @@ export default function App() {
               <span style={lbl}>Global parameters</span>
               <Slider label="Speed" value={speed} min={100} max={3000} step={100}
                 fmt={v=>`${v} sps · ${Math.round(v/400*60/5)} rpm`} onChange={setSpeed}/>
-              <Slider label="Swing angle" value={angle} min={5} max={360} step={5}
+              <Slider label="Swing angle" value={angle} min={5} max={170} step={5}
                 fmt={v=>`${v}°`} onChange={setAngle}/>
               <Slider label="Rest between swings" value={restMs} min={0} max={3000} step={50}
                 fmt={v=>v===0?"none":`${v} ms`} onChange={setRestMs}/>
@@ -939,7 +940,7 @@ export default function App() {
               <span style={lbl}>Add block</span>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:5}}>
                 {[["pendulum","⇌ Pendulum"],["wave","〜 Wave"],
-                  ["spin","↻ Spin"],["buildup","↑ Build-up"],
+                  ["buildup","↑ Build-up"],
                   ["swing","→ Swing"],["pause","⏸ Pause"]
                 ].map(([type,label])=>(
                   <Btn key={type} onClick={()=>addBlock(type)}>{label}</Btn>

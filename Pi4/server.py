@@ -20,10 +20,24 @@ import time
 import glob
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from urllib.parse import urlparse, parse_qs
 import threading
 import websockets
 import websockets.legacy.server
+
+try:
+    import cv2
+    CAMERA_AVAILABLE = True
+except ImportError:
+    CAMERA_AVAILABLE = False
+    print("opencv-python-headless not installed — camera disabled")
+
+try:
+    from picamera2 import Picamera2
+    PICAMERA2_AVAILABLE = True
+except Exception:
+    PICAMERA2_AVAILABLE = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 HTTP_PORT       = 8080
@@ -51,6 +65,109 @@ def find_pico_port():
         if "USB" in (p.description or "") or "ACM" in p.device:
             return p.device
     return None
+
+# ── Threaded HTTP server ──────────────────────────────────────────────────────
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    """Each request (including the MJPEG stream) runs in its own thread."""
+    daemon_threads = True
+
+# ── Camera Manager ────────────────────────────────────────────────────────────
+class CameraManager:
+    def __init__(self):
+        self._proc   = None   # rpicam-vid subprocess
+        self._cap    = None   # OpenCV VideoCapture (USB fallback)
+        self._frame  = None   # latest JPEG bytes
+        self._lock   = threading.Lock()
+        self.running = False
+        self._use_subprocess = False
+
+    def start(self, index=0, width=640, height=480, fps=20):
+        if PICAMERA2_AVAILABLE:
+            self._picam = Picamera2()
+            cfg = self._picam.create_preview_configuration(
+                main={"size": (width, height), "format": "RGB888"}
+            )
+            self._picam.configure(cfg)
+            self._picam.start()
+            self._use_subprocess = False
+            print(f"Pi Camera started via picamera2 ({width}×{height})")
+        else:
+            # Spawn rpicam-vid and read its raw MJPEG stdout
+            import subprocess, shutil
+            if shutil.which("rpicam-vid"):
+                self._proc = subprocess.Popen(
+                    ["rpicam-vid", "-t", "0", "--inline",
+                     "--width", str(width), "--height", str(height),
+                     "--framerate", str(fps), "--codec", "mjpeg",
+                     "--nopreview", "-o", "-"],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+                )
+                self._use_subprocess = True
+                print(f"Pi Camera started via rpicam-vid ({width}×{height} @ {fps}fps)")
+            elif CAMERA_AVAILABLE:
+                self._cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+                if not self._cap.isOpened():
+                    print("No camera found — stream disabled")
+                    return
+                self._use_subprocess = False
+                print(f"USB camera started ({width}×{height})")
+            else:
+                print("No camera backend available — stream disabled")
+                return
+        self.running = True
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def _loop(self):
+        if self._use_subprocess:
+            # Parse JPEG frames from the raw MJPEG stream by finding SOI/EOI markers
+            buf = b""
+            while self.running:
+                try:
+                    chunk = self._proc.stdout.read(4096)
+                    if not chunk:
+                        break
+                    buf += chunk
+                    start = buf.find(b"\xff\xd8")
+                    end   = buf.find(b"\xff\xd9")
+                    if start != -1 and end != -1 and end > start:
+                        frame = buf[start:end + 2]
+                        with self._lock:
+                            self._frame = frame
+                        buf = buf[end + 2:]
+                except Exception as e:
+                    print(f"Camera read error: {e}")
+                    break
+        else:
+            encode_params = [cv2.IMWRITE_JPEG_QUALITY, 70]
+            while self.running:
+                try:
+                    if hasattr(self, "_picam"):
+                        rgb = self._picam.capture_array()
+                        frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    else:
+                        ret, frame = self._cap.read()
+                        if not ret:
+                            time.sleep(0.05)
+                            continue
+                    _, buf = cv2.imencode(".jpg", frame, encode_params)
+                    with self._lock:
+                        self._frame = buf.tobytes()
+                except Exception as e:
+                    print(f"Camera capture error: {e}")
+                    time.sleep(1)
+                time.sleep(1 / 20)
+
+    def stop(self):
+        self.running = False
+        if self._proc:
+            self._proc.terminate()
+            self._proc = None
+
+    def get_frame(self):
+        with self._lock:
+            return self._frame
+
+camera_mgr = CameraManager()
 
 # ── Serial Manager ────────────────────────────────────────────────────────────
 class SerialManager:
@@ -283,7 +400,7 @@ async def broadcast_loop():
             "serial": serial_mgr.connected,
         })
         dead = set()
-        for ws in ws_clients:
+        for ws in list(ws_clients):
             try:
                 await ws.send(msg)
             except Exception:
@@ -426,16 +543,10 @@ class Handler(BaseHTTPRequestHandler):
         qs     = parse_qs(parsed.query)
 
         if path in ("/", "/index.html"):
-            f = STATIC_DIR / "index.html"
-            if f.exists():
-                data = f.read_bytes()
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
-            else:
-                self.send_json({"error": "no static UI — use the Vite dev server"}, 404)
+            self.send_response(302)
+            self.send_header("Location", "/mobile")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
             return
 
         if path == "/mobile":
@@ -446,6 +557,28 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            return
+
+        if path == "/stream":
+            if not CAMERA_AVAILABLE or not camera_mgr.running:
+                self.send_json({"error": "camera not available"}, 503)
+                return
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                while True:
+                    frame = camera_mgr.get_frame()
+                    if frame:
+                        self.wfile.write(
+                            b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + frame + b"\r\n"
+                        )
+                        self.wfile.flush()
+                    time.sleep(0.05)  # ~20 fps
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # client disconnected
             return
 
         if path == "/api/status":
@@ -576,7 +709,9 @@ async def main():
         else:
             print(f"Autostart: no sequence named '{AUTOSTART_SEQ}' found — skipping")
 
-    httpd = HTTPServer(("0.0.0.0", HTTP_PORT), Handler)
+    camera_mgr.start()
+
+    httpd = ThreadedHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     print(f"HTTP  → http://0.0.0.0:{HTTP_PORT}")
 
@@ -587,4 +722,7 @@ async def main():
     await broadcast_loop()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    finally:
+        camera_mgr.stop()

@@ -138,6 +138,20 @@ footer{padding:8px 14px;background:#0e0e1a;border-top:1px solid #181828;
     </div>
   </div>
 
+  <!-- Camera -->
+  <div class="card">
+    <div style="display:flex;align-items:center;justify-content:space-between">
+      <span class="card-label">Camera</span>
+      <div id="cam-toggle" onclick="toggleCam()"
+        style="font-size:10px;color:#4a4a6a;cursor:pointer;padding:2px 6px;
+               border:1px solid #181828;border-radius:4px">show</div>
+    </div>
+    <div id="cam-wrap" style="display:none;margin-top:6px">
+      <img id="cam-img" style="width:100%;border-radius:6px;display:block;
+        border:1px solid #181828;background:#04040a">
+    </div>
+  </div>
+
   <!-- Direct command -->
   <div class="card">
     <span class="card-label">Send command</span>
@@ -369,6 +383,16 @@ async function doShutdown() {
     wrap.appendChild(el);
   });
 })();
+
+function toggleCam() {
+  const wrap = document.getElementById("cam-wrap");
+  const btn  = document.getElementById("cam-toggle");
+  const img  = document.getElementById("cam-img");
+  const show = wrap.style.display === "none";
+  wrap.style.display = show ? "" : "none";
+  btn.textContent = show ? "hide" : "show";
+  img.src = show ? `${BASE}/stream` : "";
+}
 
 connectWS();
 loadSequences();

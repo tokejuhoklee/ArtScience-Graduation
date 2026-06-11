@@ -30,11 +30,11 @@ int drivingTeeth = 1;
 int drivenTeeth = 5;
 float gearReduction = 5.0;
 
-int currentAngle = 45;
-const int minAngle = 5, maxAngle = 360;
+int currentAngle = 90;
+const int minAngle = 5, maxAngle = 170;
 int moveRange = 0;
 
-int currentSpeed = 2000;
+int currentSpeed = 100;
 int minSpeed = 50, maxSpeed = 3000;
 int minBrakeSpeed = 50;
 bool enableBraking = true;
