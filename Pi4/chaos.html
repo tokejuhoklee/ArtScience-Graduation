@@ -229,6 +229,14 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
   <div class="card">
     <span class="card-label">Motor</span>
     <div class="prow">
+      <span class="plabel">Limit</span>
+      <input type="range" id="mlimit" min="10" max="105" step="1" value="90">
+      <span class="pval" id="mlimit-v">90°</span>
+    </div>
+    <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px">
+      hard travel cap — keep below physical stop clearance
+    </div>
+    <div class="prow">
       <span class="plabel">Speed</span>
       <input type="range" id="mspd" min="200" max="3000" step="50" value="2000">
       <span class="pval" id="mspd-v">2000 sps</span>
@@ -393,8 +401,22 @@ function rafLoop(ts) {
 // ── Sine canvas ────────────────────────────────────────────────────────────
 const WINDOW = 14; // seconds shown ahead
 function drawSine(W, H, dt) {
-  const t = runT0 !== null ? (Date.now()-runT0)/1000 : 0;
+  const t   = runT0 !== null ? (Date.now()-runT0)/1000 : 0;
+  const lim = motorLimit();
   const mid = H/2, scale = (mid-12)/MAX_DEG;
+
+  // hard-limit band (red tint beyond ±lim)
+  const limY = lim*scale;
+  ctx.fillStyle='rgba(200,40,40,0.07)';
+  ctx.fillRect(0, 0,    W, mid-limY);
+  ctx.fillRect(0, mid+limY, W, H-(mid+limY));
+
+  // limit lines
+  ctx.strokeStyle='rgba(200,60,60,0.4)'; ctx.lineWidth=1;
+  ctx.setLineDash([4,4]);
+  ctx.beginPath(); ctx.moveTo(0,mid-limY); ctx.lineTo(W,mid-limY); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(0,mid+limY); ctx.lineTo(W,mid+limY); ctx.stroke();
+  ctx.setLineDash([]);
 
   // grid
   ctx.strokeStyle='#0d0d1c'; ctx.lineWidth=1;
@@ -410,30 +432,30 @@ function drawSine(W, H, dt) {
     ctx.fillStyle='rgba(124,92,252,0.06)';
     ctx.beginPath();
     for(let px=0;px<=W;px++){
-      const ev=envVal(t+px/W*WINDOW)*MAX_DEG*scale;
+      const ev=envVal(t+px/W*WINDOW)*lim*scale;
       px===0 ? ctx.moveTo(px,mid-ev) : ctx.lineTo(px,mid-ev);
     }
     for(let px=W;px>=0;px--){
-      const ev=envVal(t+px/W*WINDOW)*MAX_DEG*scale;
+      const ev=envVal(t+px/W*WINDOW)*lim*scale;
       ctx.lineTo(px,mid+ev);
     }
     ctx.closePath(); ctx.fill();
   }
 
-  // osc 1 contribution (dim blue)
-  waveLine(W,mid,scale,t,tx=>{
+  // osc 1 contribution (dim blue) — clipped to limit
+  waveLine(W,mid,scale,lim,t,tx=>{
     const A=+ge('s1a').value,f=+ge('s1f').value,p=+ge('s1p').value*Math.PI/180;
     return A*Math.sin(TAU*f*tx+p)*envVal(tx);
   },'rgba(92,124,252,0.35)',1.5);
 
-  // osc 2 contribution (dim pink)
-  waveLine(W,mid,scale,t,tx=>{
+  // osc 2 contribution (dim pink) — clipped to limit
+  waveLine(W,mid,scale,lim,t,tx=>{
     const A=+ge('s2a').value,f=+ge('s2f').value,p=+ge('s2p').value*Math.PI/180;
     return A*Math.sin(TAU*f*tx+p)*envVal(tx);
   },'rgba(252,92,156,0.35)',1.5);
 
-  // combined (bright purple)
-  waveLine(W,mid,scale,t,tx=>sineVal(tx)*envVal(tx),'#9c7cff',2);
+  // combined — clipped to limit (bright purple inside, red outside)
+  waveLine(W,mid,scale,lim,t,tx=>sineVal(tx)*envVal(tx),'#9c7cff',2);
 
   // time cursor
   ctx.strokeStyle='rgba(252,156,76,0.5)'; ctx.lineWidth=1;
@@ -443,8 +465,10 @@ function drawSine(W, H, dt) {
 
   // current dot + value
   const cur = sineVal(t)*envVal(t);
-  const cy  = mid - Math.max(-MAX_DEG,Math.min(MAX_DEG,cur))*scale;
-  ctx.fillStyle='#fc9c4c';
+  const clampedCur = Math.max(-lim, Math.min(lim, cur));
+  const cy = mid - clampedCur*scale;
+  // dot: orange if within limit, red if clamped
+  ctx.fillStyle = (Math.abs(cur) > lim) ? '#fc4c4c' : '#fc9c4c';
   ctx.beginPath(); ctx.arc(0,cy,4.5,0,TAU); ctx.fill();
 
   // y labels
@@ -453,15 +477,16 @@ function drawSine(W, H, dt) {
     ctx.fillText(a+'°',3,mid-a*scale-2);
   });
 
-  if (runT0 === null) updatePosBar(0);
-  else updatePosBar(cur);
+  if (runT0 === null) updatePosBar(0, lim);
+  else updatePosBar(clampedCur, lim);
 }
 
-function waveLine(W,mid,scale,t0,fn,color,lw) {
+function waveLine(W,mid,scale,lim,t0,fn,color,lw) {
   ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.beginPath();
   for(let px=0;px<=W;px++){
-    const tx=t0+px/W*WINDOW;
-    const y=mid-Math.max(-MAX_DEG,Math.min(MAX_DEG,fn(tx)))*scale;
+    const tx  = t0+px/W*WINDOW;
+    const raw = fn(tx);
+    const y   = mid - Math.max(-lim,Math.min(lim,raw))*scale;
     px===0 ? ctx.moveTo(px,y) : ctx.lineTo(px,y);
   }
   ctx.stroke();
@@ -478,17 +503,61 @@ function drawChaos(W, H, dt) {
   const steps    = Math.max(1, Math.round(dt*simSpeed/SIM_DT));
   for(let i=0;i<steps;i++) chaosDP.step(SIM_DT);
 
-  const split = W*0.56;
+  const lim    = motorLimit();
+  const split  = W*0.56;
   const {th1,th2,w1,L1,L2} = chaosDP;
   const scale  = +ge('cscale').value;
-  const motorDeg = Math.max(-MAX_DEG, Math.min(MAX_DEG, th1*180/Math.PI*scale));
+  const rawDeg = th1*180/Math.PI*scale;
+  const motorDeg = Math.max(-lim, Math.min(lim, rawDeg));
+  const clamped  = Math.abs(rawDeg) > lim;
 
   // ── Left: pendulum animation ──────────────────────────────────────
-  const cx = split*0.5, cy = H*0.32;
-  const pxm = (H*0.62)/(L1+L2);
+  const cx = split*0.5, cy = H*0.30;
+  const pxm = (H*0.60)/(L1+L2);
 
   const x1 = cx+Math.sin(th1)*L1*pxm, y1 = cy+Math.cos(th1)*L1*pxm;
   const x2 = x1+Math.sin(th2)*L2*pxm, y2 = y1+Math.cos(th2)*L2*pxm;
+
+  // Motor travel fan — shows the ±lim arc the actual motor can reach
+  const fanR    = Math.min(split*0.82, H*0.72);
+  const limRad  = lim*Math.PI/180;
+  const fanTop  = -Math.PI/2; // "up" = pendulum hanging straight down = motor zero
+
+  // Safe zone (within limit) — subtle green tint
+  ctx.fillStyle = clamped ? 'rgba(200,40,40,0.07)' : 'rgba(40,180,80,0.06)';
+  ctx.beginPath();
+  ctx.moveTo(cx, cy);
+  ctx.arc(cx, cy, fanR, fanTop - limRad, fanTop + limRad);
+  ctx.closePath(); ctx.fill();
+
+  // Limit boundary lines
+  ctx.strokeStyle = clamped ? 'rgba(220,60,60,0.5)' : 'rgba(60,180,80,0.25)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4,4]);
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(cx + Math.sin(-limRad)*fanR, cy - Math.cos(limRad)*fanR);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.lineTo(cx + Math.sin(limRad)*fanR, cy - Math.cos(limRad)*fanR);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Limit arc edge
+  ctx.strokeStyle = clamped ? 'rgba(220,60,60,0.4)' : 'rgba(60,180,80,0.2)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.arc(cx, cy, fanR, fanTop-limRad, fanTop+limRad);
+  ctx.stroke();
+
+  // Motor position line (what the motor actually does)
+  const motorRad = motorDeg*Math.PI/180;
+  const mxEnd = cx + Math.sin(motorRad)*fanR*0.9;
+  const myEnd = cy - Math.cos(motorRad)*fanR*0.9;
+  ctx.strokeStyle = clamped ? '#fc4c4c' : '#7c5cfc';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(mxEnd,myEnd); ctx.stroke();
 
   // Bob 2 trail
   bob2Trail.push([x2,y2]);
@@ -496,7 +565,7 @@ function drawChaos(W, H, dt) {
   if(bob2Trail.length>1){
     for(let i=1;i<bob2Trail.length;i++){
       const a=i/bob2Trail.length;
-      ctx.strokeStyle=`rgba(252,156,76,${a*0.55})`;
+      ctx.strokeStyle=`rgba(252,156,76,${a*0.45})`;
       ctx.lineWidth=1;
       ctx.beginPath();
       ctx.moveTo(bob2Trail[i-1][0],bob2Trail[i-1][1]);
@@ -505,8 +574,8 @@ function drawChaos(W, H, dt) {
     }
   }
 
-  // Arms
-  ctx.strokeStyle='#2a2a48'; ctx.lineWidth=2;
+  // Arms (dim — simulation reference only)
+  ctx.strokeStyle='#22223c'; ctx.lineWidth=1.5;
   ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x1,y1); ctx.stroke();
   ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
 
@@ -514,21 +583,17 @@ function drawChaos(W, H, dt) {
   ctx.fillStyle='#3a3a58';
   ctx.beginPath(); ctx.arc(cx,cy,4,0,TAU); ctx.fill();
 
-  // Bob 1 (purple)
-  ctx.fillStyle='#7c5cfc';
-  ctx.beginPath(); ctx.arc(x1,y1,6,0,TAU); ctx.fill();
+  // Bob 1 (dim purple — simulation)
+  ctx.fillStyle='rgba(124,92,252,0.5)';
+  ctx.beginPath(); ctx.arc(x1,y1,5,0,TAU); ctx.fill();
 
-  // Bob 2 (orange)
-  ctx.fillStyle='#fc9c4c';
-  ctx.beginPath(); ctx.arc(x2,y2,5,0,TAU); ctx.fill();
+  // Bob 2 (dim orange — simulation)
+  ctx.fillStyle='rgba(252,156,76,0.5)';
+  ctx.beginPath(); ctx.arc(x2,y2,4,0,TAU); ctx.fill();
 
-  // motor angle arc on pivot
-  ctx.strokeStyle='rgba(124,92,252,0.25)'; ctx.lineWidth=1.5;
-  const arcR=22, arcAng=motorDeg*Math.PI/180;
-  ctx.beginPath();
-  ctx.moveTo(cx,cy);
-  ctx.arc(cx,cy,arcR,-Math.PI/2,-Math.PI/2+arcAng, arcAng<0);
-  ctx.stroke();
+  // Motor position dot on arc edge
+  ctx.fillStyle = clamped ? '#fc4c4c' : '#9c7cff';
+  ctx.beginPath(); ctx.arc(mxEnd, myEnd, 4.5, 0, TAU); ctx.fill();
 
   // ── Right: phase portrait (th1 vs w1) ────────────────────────────
   const px0 = split + (W-split)*0.5;
@@ -568,13 +633,14 @@ function drawChaos(W, H, dt) {
   ctx.fillStyle='#9c7cff';
   ctx.beginPath(); ctx.arc(cpx,cpy,3.5,0,TAU); ctx.fill();
 
-  updatePosBar(motorDeg);
+  updatePosBar(motorDeg, lim);
 }
 
 // ── Position bar ───────────────────────────────────────────────────────────
-function updatePosBar(deg) {
-  deg = Math.max(-MAX_DEG, Math.min(MAX_DEG, deg));
-  const pct = (deg+MAX_DEG)/(2*MAX_DEG)*100;
+function updatePosBar(deg, lim) {
+  lim = lim || motorLimit();
+  deg = Math.max(-lim, Math.min(lim, deg));
+  const pct = (deg+lim)/(2*lim)*100;
   ge('pos-thumb').style.left = pct+'%';
   ge('pos-deg').textContent  = deg.toFixed(1)+'°';
 }
@@ -590,6 +656,7 @@ const SLIDERS = [
   ['env-a',v=>(+v).toFixed(1)+' s'],
   ['env-h',v=>v+' s'],
   ['env-d',v=>(+v).toFixed(1)+' s'],
+  ['mlimit',v=>v+'°'],
   ['mspd', v=>v+' sps'],
   ['cL1',  v=>(+v).toFixed(2)+' m'],
   ['cL2',  v=>(+v).toFixed(2)+' m'],
@@ -628,7 +695,10 @@ function toggleFree() {
 }
 
 // ── API ────────────────────────────────────────────────────────────────────
+function motorLimit() { return +ge('mlimit').value; }
+
 function buildParams() {
+  const limit = motorLimit();
   if (mode === 'sine') {
     return {
       mode:'sine',
@@ -637,7 +707,7 @@ function buildParams() {
       envelope: freerun ? null : {
         attack:+ge('env-a').value, hold:+ge('env-h').value, decay:+ge('env-d').value
       },
-      speed:+ge('mspd').value,
+      limit, speed:+ge('mspd').value,
     };
   }
   return {
@@ -649,7 +719,7 @@ function buildParams() {
     damping:+ge('cdamp').value,
     scale:+ge('cscale').value,
     simSpeed:+ge('csim').value,
-    speed:+ge('mspd').value,
+    limit, speed:+ge('mspd').value,
   };
 }
 

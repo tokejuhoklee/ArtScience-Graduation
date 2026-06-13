@@ -446,8 +446,10 @@ class OscillatorEngine:
         self.running = True
         DT = 1.0 / self.RATE
 
-        # Motor setup: disable ramps for smooth continuous tracking
-        for cmd in ("on", "angle 105", "softstartoff", "brakeoff"):
+        # Motor setup: set hard travel limit, disable ramps for smooth tracking
+        limit = int(initial_params.get('limit', 90))
+        limit = max(10, min(105, limit))
+        for cmd in ("on", f"angle {limit}", "softstartoff", "brakeoff"):
             serial_mgr.send(cmd)
             await asyncio.sleep(0.04)
 
@@ -478,16 +480,17 @@ class OscillatorEngine:
                     last_speed = speed
 
                 if mode == 'sine':
-                    angle = self._sine(t, p)
+                    lim   = max(10, min(105, int(p.get('limit', 90))))
+                    angle = max(-lim, min(lim, self._sine(t, p)))
                 elif mode == 'chaos' and dp is not None:
                     dp.damping   = p.get('damping', 0.01)
                     sim_speed    = p.get('simSpeed', 1.0)
                     steps_needed = max(1, round(DT * sim_speed / self.SIM_DT))
                     for _ in range(steps_needed):
                         dp.step(self.SIM_DT)
-                    scale = p.get('scale', 0.58)
-                    angle = max(-self.MAX_DEG,
-                                min(self.MAX_DEG, math.degrees(dp.th1) * scale))
+                    scale    = p.get('scale', 0.58)
+                    lim      = max(10, min(105, int(p.get('limit', 90))))
+                    angle    = max(-lim, min(lim, math.degrees(dp.th1) * scale))
                 else:
                     angle = 0.0
 
