@@ -1,0 +1,694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Whip — Chaos</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;background:#07070e;color:#c0c0e0;font-family:monospace;font-size:14px}
+body{display:flex;flex-direction:column;overflow:hidden}
+
+header{padding:10px 14px 9px;background:#0e0e1a;border-bottom:1px solid #181828;
+  display:flex;align-items:center;gap:10px;flex-shrink:0}
+.title{flex:1;font-size:11px;letter-spacing:.15em;text-transform:uppercase;color:#4a4a6a}
+.badge{font-size:9px;letter-spacing:.1em;text-transform:uppercase;color:#fc9c4c;
+  padding:2px 7px;border:1px solid #4c3010;border-radius:3px;background:#120a02;display:none}
+.badge.on{display:inline}
+.dot{width:8px;height:8px;border-radius:50%;background:#1e1e2e;transition:all .3s;flex-shrink:0}
+.dot.on{background:#3ccc7c;box-shadow:0 0 5px #3ccc7c}
+
+.tabs{display:flex;background:#08080f;border-bottom:1px solid #181828;flex-shrink:0}
+.tab{flex:1;padding:10px 6px;text-align:center;font-family:monospace;font-size:10px;
+  letter-spacing:.12em;text-transform:uppercase;cursor:pointer;
+  border-bottom:2px solid transparent;color:#2e2e4e;transition:all .15s}
+.tab.active{color:#9c7cff;border-bottom-color:#7c5cfc}
+
+.scroll{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px;
+  padding-bottom:80px}
+
+.card{background:#0e0e1a;border:1px solid #181828;border-radius:9px;padding:11px;
+  display:flex;flex-direction:column;gap:7px}
+.card-label{font-size:9px;letter-spacing:.13em;text-transform:uppercase;color:#4a4a6a}
+
+.prow{display:grid;grid-template-columns:46px 1fr 58px;align-items:center;gap:6px;padding:1px 0}
+.plabel{font-size:10px;color:#4a4a6a;text-align:right}
+input[type=range]{width:100%;accent-color:#7c5cfc;cursor:pointer;height:3px}
+.pval{font-size:11px;color:#c8c8e8;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+
+.tog-row{display:flex;align-items:center;justify-content:space-between;
+  font-size:11px;color:#7070a0;padding:2px 0}
+.tog{position:relative;width:32px;height:18px;border-radius:9px;cursor:pointer;
+  background:#1c1c30;transition:background .15s;flex-shrink:0}
+.tog.on{background:#7c5cfc}
+.tog::after{content:"";position:absolute;width:12px;height:12px;border-radius:50%;
+  background:#07070e;top:3px;left:3px;transition:left .15s}
+.tog.on::after{left:17px}
+
+canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;display:block}
+
+.footer{position:fixed;bottom:0;left:0;right:0;background:#0a0a14;
+  border-top:1px solid #181828;padding:10px 12px;display:flex;flex-direction:column;gap:7px;
+  z-index:10}
+.pos-row{display:flex;align-items:center;gap:10px}
+.pos-deg{color:#9c7cff;font-size:15px;min-width:60px;font-variant-numeric:tabular-nums}
+.pos-track{flex:1;height:3px;background:#181828;border-radius:2px;position:relative}
+.pos-thumb{position:absolute;top:-4px;width:11px;height:11px;border-radius:50%;
+  background:#7c5cfc;transform:translateX(-50%);transition:left .08s}
+.pos-lim{font-size:9px;color:#2a2a42}
+.btn-row{display:flex;gap:8px}
+.btn{flex:1;padding:11px 8px;border-radius:8px;border:1px solid #181828;background:#0a0a14;
+  color:#c0c0e0;font-family:monospace;font-size:13px;font-weight:600;
+  cursor:pointer;text-align:center;user-select:none;transition:opacity .1s,transform .1s;
+  -webkit-user-select:none}
+.btn:active{opacity:.5;transform:scale(.97)}
+.btn.run{border-color:#2c6c4c;background:#051009;color:#3ccc7c}
+.btn.stop{border-color:#6c2c2c;background:#100505;color:#ec6c6c}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="title">Whip — Chaos</span>
+  <span id="badge" class="badge">running</span>
+  <span id="dot-serial" class="dot" title="serial"></span>
+  <span id="dot-ws" class="dot" title="ws"></span>
+</header>
+
+<div class="tabs">
+  <div class="tab active" id="tab-sine" onclick="switchTab('sine')">Sine</div>
+  <div class="tab" id="tab-chaos" onclick="switchTab('chaos')">Chaos</div>
+</div>
+
+<div class="scroll">
+
+  <div class="card" style="padding:6px">
+    <canvas id="viz" height="200"></canvas>
+  </div>
+
+  <!-- ── SINE PANEL ─────────────────────────────────────────────────── -->
+  <div id="panel-sine">
+
+    <div class="card">
+      <span class="card-label">Oscillator 1</span>
+      <div class="prow">
+        <span class="plabel">Amp</span>
+        <input type="range" id="s1a" min="0" max="105" step="1" value="80">
+        <span class="pval" id="s1a-v">80°</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">Freq</span>
+        <input type="range" id="s1f" min="0.02" max="3" step="0.01" value="0.4">
+        <span class="pval" id="s1f-v">0.40 Hz</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">Phase</span>
+        <input type="range" id="s1p" min="0" max="360" step="1" value="0">
+        <span class="pval" id="s1p-v">0°</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-label">Oscillator 2</span>
+      <div class="prow">
+        <span class="plabel">Amp</span>
+        <input type="range" id="s2a" min="0" max="105" step="1" value="25">
+        <span class="pval" id="s2a-v">25°</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">Freq</span>
+        <input type="range" id="s2f" min="0.02" max="3" step="0.01" value="1.1">
+        <span class="pval" id="s2f-v">1.10 Hz</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">Phase</span>
+        <input type="range" id="s2p" min="0" max="360" step="1" value="90">
+        <span class="pval" id="s2p-v">90°</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-label">Envelope</span>
+      <div class="tog-row">
+        <span>Free run (loop forever)</span>
+        <div class="tog on" id="tog-free" onclick="toggleFree()"></div>
+      </div>
+      <div id="env-sliders" style="opacity:.3;pointer-events:none;display:flex;flex-direction:column;gap:7px;margin-top:2px">
+        <div class="prow">
+          <span class="plabel">Attack</span>
+          <input type="range" id="env-a" min="0" max="30" step="0.5" value="8">
+          <span class="pval" id="env-a-v">8.0 s</span>
+        </div>
+        <div class="prow">
+          <span class="plabel">Hold</span>
+          <input type="range" id="env-h" min="0" max="120" step="1" value="30">
+          <span class="pval" id="env-h-v">30 s</span>
+        </div>
+        <div class="prow">
+          <span class="plabel">Decay</span>
+          <input type="range" id="env-d" min="0" max="30" step="0.5" value="10">
+          <span class="pval" id="env-d-v">10.0 s</span>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- /panel-sine -->
+
+  <!-- ── CHAOS PANEL ────────────────────────────────────────────────── -->
+  <div id="panel-chaos" style="display:none">
+
+    <div class="card">
+      <span class="card-label">Pendulum</span>
+      <div class="prow">
+        <span class="plabel">L₁</span>
+        <input type="range" id="cL1" min="0.3" max="2" step="0.05" value="1.0">
+        <span class="pval" id="cL1-v">1.00 m</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">L₂</span>
+        <input type="range" id="cL2" min="0.3" max="2" step="0.05" value="0.8">
+        <span class="pval" id="cL2-v">0.80 m</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">m₁</span>
+        <input type="range" id="cm1" min="0.2" max="3" step="0.1" value="1.0">
+        <span class="pval" id="cm1-v">1.0 kg</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">m₂</span>
+        <input type="range" id="cm2" min="0.2" max="3" step="0.1" value="0.8">
+        <span class="pval" id="cm2-v">0.8 kg</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">Damp</span>
+        <input type="range" id="cdamp" min="0" max="0.5" step="0.005" value="0.01">
+        <span class="pval" id="cdamp-v">0.010</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-label">Initial Conditions</span>
+      <div class="prow">
+        <span class="plabel">θ₁</span>
+        <input type="range" id="cth1" min="-180" max="180" step="1" value="130">
+        <span class="pval" id="cth1-v">130°</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">θ₂</span>
+        <input type="range" id="cth2" min="-180" max="180" step="1" value="95">
+        <span class="pval" id="cth2-v">95°</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">ω₁</span>
+        <input type="range" id="cw1" min="-5" max="5" step="0.1" value="0">
+        <span class="pval" id="cw1-v">0.0</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-label">Motor Mapping</span>
+      <div class="prow">
+        <span class="plabel">Scale</span>
+        <input type="range" id="cscale" min="0.1" max="1" step="0.05" value="0.58">
+        <span class="pval" id="cscale-v">0.58×</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">Sim ×</span>
+        <input type="range" id="csim" min="0.2" max="4" step="0.1" value="1.0">
+        <span class="pval" id="csim-v">1.0×</span>
+      </div>
+      <div class="tog-row" style="margin-top:2px">
+        <span>Reset sim on IC change</span>
+        <div class="tog on" id="tog-reset"></div>
+      </div>
+    </div>
+
+  </div><!-- /panel-chaos -->
+
+  <!-- ── MOTOR ─────────────────────────────────────────────────────── -->
+  <div class="card">
+    <span class="card-label">Motor</span>
+    <div class="prow">
+      <span class="plabel">Speed</span>
+      <input type="range" id="mspd" min="200" max="3000" step="50" value="2000">
+      <span class="pval" id="mspd-v">2000 sps</span>
+    </div>
+  </div>
+
+</div><!-- /scroll -->
+
+<div class="footer">
+  <div class="pos-row">
+    <span class="pos-deg" id="pos-deg">0.0°</span>
+    <div class="pos-track">
+      <div class="pos-thumb" id="pos-thumb" style="left:50%"></div>
+    </div>
+    <span class="pos-lim">±105°</span>
+  </div>
+  <div class="btn-row">
+    <div class="btn run" onclick="doRun()">▶ Run</div>
+    <div class="btn stop" onclick="doStop()">⬛ Stop</div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const BASE   = `${location.protocol}//${location.hostname}:8080`;
+const WS_URL = `ws://${location.hostname}:8081`;
+const TAU    = Math.PI * 2;
+const MAX_DEG = 105;
+
+// ── State ──────────────────────────────────────────────────────────────────
+let mode = 'sine';
+let running = false;
+let freerun = true;
+let runT0 = null;          // browser-side run start (ms)
+let chaosDP = null;
+let bob2Trail = [];        // [{x,y}] canvas coords for pendulum trail
+let phaseTrail = [];       // [{th, w}] for phase portrait
+let lastRaf = 0;
+let updateTimer = null;
+
+// ── WebSocket ──────────────────────────────────────────────────────────────
+let ws = null;
+function connectWS() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen  = () => setDot('dot-ws', 'on');
+  ws.onclose = () => { setDot('dot-ws', false); setTimeout(connectWS, 2000); };
+  ws.onerror = () => setDot('dot-ws', false);
+  ws.onmessage = e => {
+    try {
+      const d = JSON.parse(e.data);
+      setDot('dot-serial', d.serial ? 'on' : false);
+      if (d.osc !== undefined) {
+        running = d.osc.running;
+        ge('badge').classList.toggle('on', running);
+        if (d.osc.running && d.osc.angle !== undefined) {
+          updatePosBar(d.osc.angle);
+        }
+      }
+    } catch {}
+  };
+}
+
+// ── Tab switching ──────────────────────────────────────────────────────────
+function switchTab(t) {
+  mode = t;
+  ge('tab-sine').classList.toggle('active', t === 'sine');
+  ge('tab-chaos').classList.toggle('active', t === 'chaos');
+  ge('panel-sine').style.display  = t === 'sine'  ? '' : 'none';
+  ge('panel-chaos').style.display = t === 'chaos' ? '' : 'none';
+  if (t === 'chaos' && !chaosDP) resetChaos();
+  bob2Trail = []; phaseTrail = [];
+}
+
+// ── Sine math ──────────────────────────────────────────────────────────────
+function sineVal(t) {
+  const A1 = +ge('s1a').value, f1 = +ge('s1f').value, p1 = +ge('s1p').value * Math.PI/180;
+  const A2 = +ge('s2a').value, f2 = +ge('s2f').value, p2 = +ge('s2p').value * Math.PI/180;
+  return A1*Math.sin(TAU*f1*t+p1) + A2*Math.sin(TAU*f2*t+p2);
+}
+
+function envVal(t) {
+  if (freerun) return 1;
+  const atk = +ge('env-a').value, hld = +ge('env-h').value, dcy = +ge('env-d').value;
+  if (t < atk)          return atk > 0 ? t/atk : 1;
+  if (t < atk+hld)      return 1;
+  const dt = t-atk-hld; return dcy > 0 ? Math.max(0, 1-dt/dcy) : 0;
+}
+
+// ── Double pendulum (RK4) ──────────────────────────────────────────────────
+class DP {
+  constructor(L1, L2, m1, m2, th1, th2, w1, damping) {
+    this.L1=L1; this.L2=L2; this.m1=m1; this.m2=m2;
+    this.th1=th1*Math.PI/180; this.th2=th2*Math.PI/180;
+    this.w1=w1; this.w2=0; this.damping=damping;
+  }
+  _d(th1,th2,w1,w2) {
+    const {L1,L2,m1,m2,damping}=this, g=9.81;
+    const D = 2*m1+m2-m2*Math.cos(2*th1-2*th2);
+    const dw1 = (-g*(2*m1+m2)*Math.sin(th1)
+                 -m2*g*Math.sin(th1-2*th2)
+                 -2*Math.sin(th1-th2)*m2*(w2*w2*L2+w1*w1*L1*Math.cos(th1-th2)))
+                / (L1*D);
+    const dw2 = (2*Math.sin(th1-th2)*(w1*w1*L1*(m1+m2)
+                 +g*(m1+m2)*Math.cos(th1)
+                 +w2*w2*L2*m2*Math.cos(th1-th2)))
+                / (L2*D);
+    return [w1,w2,dw1-damping*w1,dw2-damping*w2];
+  }
+  step(dt) {
+    const [a,b,c,d]   = this._d(this.th1,this.th2,this.w1,this.w2);
+    const [a2,b2,c2,d2] = this._d(this.th1+a*dt/2,this.th2+b*dt/2,this.w1+c*dt/2,this.w2+d*dt/2);
+    const [a3,b3,c3,d3] = this._d(this.th1+a2*dt/2,this.th2+b2*dt/2,this.w1+c2*dt/2,this.w2+d2*dt/2);
+    const [a4,b4,c4,d4] = this._d(this.th1+a3*dt,this.th2+b3*dt,this.w1+c3*dt,this.w2+d3*dt);
+    this.th1 += dt/6*(a+2*a2+2*a3+a4);
+    this.th2 += dt/6*(b+2*b2+2*b3+b4);
+    this.w1  += dt/6*(c+2*c2+2*c3+c4);
+    this.w2  += dt/6*(d+2*d2+2*d3+d4);
+  }
+}
+
+function resetChaos() {
+  bob2Trail=[]; phaseTrail=[];
+  chaosDP = new DP(
+    +ge('cL1').value, +ge('cL2').value,
+    +ge('cm1').value, +ge('cm2').value,
+    +ge('cth1').value, +ge('cth2').value,
+    +ge('cw1').value,
+    +ge('cdamp').value
+  );
+}
+
+// ── Canvas ─────────────────────────────────────────────────────────────────
+const canvas = ge('viz');
+const ctx    = canvas.getContext('2d');
+
+function resizeCanvas() {
+  const r = devicePixelRatio || 1;
+  const w = canvas.clientWidth;
+  const h = 200;
+  canvas.width  = w*r; canvas.height = h*r;
+  ctx.scale(r,r);
+  canvas.style.height = h+'px';
+}
+
+function rafLoop(ts) {
+  requestAnimationFrame(rafLoop);
+  const dt = Math.min((ts-lastRaf)/1000, 0.05);
+  lastRaf = ts;
+  const W = canvas.clientWidth, H = 200;
+  ctx.clearRect(0,0,W,H);
+  if (mode==='sine') drawSine(W,H,dt);
+  else               drawChaos(W,H,dt);
+}
+
+// ── Sine canvas ────────────────────────────────────────────────────────────
+const WINDOW = 14; // seconds shown ahead
+function drawSine(W, H, dt) {
+  const t = runT0 !== null ? (Date.now()-runT0)/1000 : 0;
+  const mid = H/2, scale = (mid-12)/MAX_DEG;
+
+  // grid
+  ctx.strokeStyle='#0d0d1c'; ctx.lineWidth=1;
+  [-90,-60,-30,30,60,90].forEach(a => {
+    const y=mid-a*scale;
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+  });
+  ctx.strokeStyle='#1c1c30'; ctx.lineWidth=1.5;
+  ctx.beginPath(); ctx.moveTo(0,mid); ctx.lineTo(W,mid); ctx.stroke();
+
+  // envelope band
+  if (!freerun) {
+    ctx.fillStyle='rgba(124,92,252,0.06)';
+    ctx.beginPath();
+    for(let px=0;px<=W;px++){
+      const ev=envVal(t+px/W*WINDOW)*MAX_DEG*scale;
+      px===0 ? ctx.moveTo(px,mid-ev) : ctx.lineTo(px,mid-ev);
+    }
+    for(let px=W;px>=0;px--){
+      const ev=envVal(t+px/W*WINDOW)*MAX_DEG*scale;
+      ctx.lineTo(px,mid+ev);
+    }
+    ctx.closePath(); ctx.fill();
+  }
+
+  // osc 1 contribution (dim blue)
+  waveLine(W,mid,scale,t,tx=>{
+    const A=+ge('s1a').value,f=+ge('s1f').value,p=+ge('s1p').value*Math.PI/180;
+    return A*Math.sin(TAU*f*tx+p)*envVal(tx);
+  },'rgba(92,124,252,0.35)',1.5);
+
+  // osc 2 contribution (dim pink)
+  waveLine(W,mid,scale,t,tx=>{
+    const A=+ge('s2a').value,f=+ge('s2f').value,p=+ge('s2p').value*Math.PI/180;
+    return A*Math.sin(TAU*f*tx+p)*envVal(tx);
+  },'rgba(252,92,156,0.35)',1.5);
+
+  // combined (bright purple)
+  waveLine(W,mid,scale,t,tx=>sineVal(tx)*envVal(tx),'#9c7cff',2);
+
+  // time cursor
+  ctx.strokeStyle='rgba(252,156,76,0.5)'; ctx.lineWidth=1;
+  ctx.setLineDash([3,4]);
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,H); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // current dot + value
+  const cur = sineVal(t)*envVal(t);
+  const cy  = mid - Math.max(-MAX_DEG,Math.min(MAX_DEG,cur))*scale;
+  ctx.fillStyle='#fc9c4c';
+  ctx.beginPath(); ctx.arc(0,cy,4.5,0,TAU); ctx.fill();
+
+  // y labels
+  ctx.fillStyle='#2a2a42'; ctx.font='9px monospace'; ctx.textAlign='left';
+  [-90,-60,-30,30,60,90].forEach(a=>{
+    ctx.fillText(a+'°',3,mid-a*scale-2);
+  });
+
+  if (runT0 === null) updatePosBar(0);
+  else updatePosBar(cur);
+}
+
+function waveLine(W,mid,scale,t0,fn,color,lw) {
+  ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.beginPath();
+  for(let px=0;px<=W;px++){
+    const tx=t0+px/W*WINDOW;
+    const y=mid-Math.max(-MAX_DEG,Math.min(MAX_DEG,fn(tx)))*scale;
+    px===0 ? ctx.moveTo(px,y) : ctx.lineTo(px,y);
+  }
+  ctx.stroke();
+}
+
+// ── Chaos canvas ───────────────────────────────────────────────────────────
+const SIM_DT = 0.003; // integration step
+
+function drawChaos(W, H, dt) {
+  if (!chaosDP) return;
+
+  // advance simulation
+  const simSpeed = +ge('csim').value;
+  const steps    = Math.max(1, Math.round(dt*simSpeed/SIM_DT));
+  for(let i=0;i<steps;i++) chaosDP.step(SIM_DT);
+
+  const split = W*0.56;
+  const {th1,th2,w1,L1,L2} = chaosDP;
+  const scale  = +ge('cscale').value;
+  const motorDeg = Math.max(-MAX_DEG, Math.min(MAX_DEG, th1*180/Math.PI*scale));
+
+  // ── Left: pendulum animation ──────────────────────────────────────
+  const cx = split*0.5, cy = H*0.32;
+  const pxm = (H*0.62)/(L1+L2);
+
+  const x1 = cx+Math.sin(th1)*L1*pxm, y1 = cy+Math.cos(th1)*L1*pxm;
+  const x2 = x1+Math.sin(th2)*L2*pxm, y2 = y1+Math.cos(th2)*L2*pxm;
+
+  // Bob 2 trail
+  bob2Trail.push([x2,y2]);
+  if(bob2Trail.length>350) bob2Trail.shift();
+  if(bob2Trail.length>1){
+    for(let i=1;i<bob2Trail.length;i++){
+      const a=i/bob2Trail.length;
+      ctx.strokeStyle=`rgba(252,156,76,${a*0.55})`;
+      ctx.lineWidth=1;
+      ctx.beginPath();
+      ctx.moveTo(bob2Trail[i-1][0],bob2Trail[i-1][1]);
+      ctx.lineTo(bob2Trail[i][0],  bob2Trail[i][1]);
+      ctx.stroke();
+    }
+  }
+
+  // Arms
+  ctx.strokeStyle='#2a2a48'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(x1,y1); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+
+  // Pivot
+  ctx.fillStyle='#3a3a58';
+  ctx.beginPath(); ctx.arc(cx,cy,4,0,TAU); ctx.fill();
+
+  // Bob 1 (purple)
+  ctx.fillStyle='#7c5cfc';
+  ctx.beginPath(); ctx.arc(x1,y1,6,0,TAU); ctx.fill();
+
+  // Bob 2 (orange)
+  ctx.fillStyle='#fc9c4c';
+  ctx.beginPath(); ctx.arc(x2,y2,5,0,TAU); ctx.fill();
+
+  // motor angle arc on pivot
+  ctx.strokeStyle='rgba(124,92,252,0.25)'; ctx.lineWidth=1.5;
+  const arcR=22, arcAng=motorDeg*Math.PI/180;
+  ctx.beginPath();
+  ctx.moveTo(cx,cy);
+  ctx.arc(cx,cy,arcR,-Math.PI/2,-Math.PI/2+arcAng, arcAng<0);
+  ctx.stroke();
+
+  // ── Right: phase portrait (th1 vs w1) ────────────────────────────
+  const px0 = split + (W-split)*0.5;
+  const py0 = H*0.5;
+  const psx = (W-split)*0.45/Math.PI;   // rad → px
+  const psy = H*0.42/8;                  // rad/s → px (±8 rad/s range)
+
+  // axes
+  ctx.strokeStyle='#141428'; ctx.lineWidth=1;
+  ctx.beginPath(); ctx.moveTo(split+2,py0); ctx.lineTo(W-2,py0); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px0,4);       ctx.lineTo(px0,H-4); ctx.stroke();
+
+  // label
+  ctx.fillStyle='#242440'; ctx.font='8px monospace'; ctx.textAlign='center';
+  ctx.fillText('θ₁', W-8, py0-4);
+  ctx.fillText('ω₁', px0+4, 10);
+
+  // phase trail
+  phaseTrail.push({th:th1, w:w1});
+  if(phaseTrail.length>600) phaseTrail.shift();
+  if(phaseTrail.length>1){
+    for(let i=1;i<phaseTrail.length;i++){
+      const a=i/phaseTrail.length;
+      ctx.strokeStyle=`rgba(156,124,255,${a*0.7})`;
+      ctx.lineWidth=1;
+      const ppx0=px0+phaseTrail[i-1].th*psx, ppy0=py0-phaseTrail[i-1].w*psy;
+      const ppx1=px0+phaseTrail[i].th*psx,   ppy1=py0-phaseTrail[i].w*psy;
+      if(ppx0>split && ppx0<W && ppx1>split && ppx1<W){
+        ctx.beginPath(); ctx.moveTo(ppx0,ppy0); ctx.lineTo(ppx1,ppy1); ctx.stroke();
+      }
+    }
+  }
+
+  // current point
+  const cpx=Math.max(split+2,Math.min(W-2, px0+th1*psx));
+  const cpy=Math.max(2,       Math.min(H-2, py0-w1*psy));
+  ctx.fillStyle='#9c7cff';
+  ctx.beginPath(); ctx.arc(cpx,cpy,3.5,0,TAU); ctx.fill();
+
+  updatePosBar(motorDeg);
+}
+
+// ── Position bar ───────────────────────────────────────────────────────────
+function updatePosBar(deg) {
+  deg = Math.max(-MAX_DEG, Math.min(MAX_DEG, deg));
+  const pct = (deg+MAX_DEG)/(2*MAX_DEG)*100;
+  ge('pos-thumb').style.left = pct+'%';
+  ge('pos-deg').textContent  = deg.toFixed(1)+'°';
+}
+
+// ── Slider binding ─────────────────────────────────────────────────────────
+const SLIDERS = [
+  ['s1a',  v=>v+'°'],
+  ['s1f',  v=>(+v).toFixed(2)+' Hz'],
+  ['s1p',  v=>v+'°'],
+  ['s2a',  v=>v+'°'],
+  ['s2f',  v=>(+v).toFixed(2)+' Hz'],
+  ['s2p',  v=>v+'°'],
+  ['env-a',v=>(+v).toFixed(1)+' s'],
+  ['env-h',v=>v+' s'],
+  ['env-d',v=>(+v).toFixed(1)+' s'],
+  ['mspd', v=>v+' sps'],
+  ['cL1',  v=>(+v).toFixed(2)+' m'],
+  ['cL2',  v=>(+v).toFixed(2)+' m'],
+  ['cm1',  v=>(+v).toFixed(1)+' kg'],
+  ['cm2',  v=>(+v).toFixed(1)+' kg'],
+  ['cdamp',v=>(+v).toFixed(3)],
+  ['cth1', v=>v+'°'],
+  ['cth2', v=>v+'°'],
+  ['cw1',  v=>(+v).toFixed(1)],
+  ['cscale',v=>(+v).toFixed(2)+'×'],
+  ['csim', v=>(+v).toFixed(1)+'×'],
+];
+
+function bindSliders() {
+  SLIDERS.forEach(([id, fmt]) => {
+    const el=ge(id), vl=ge(id+'-v');
+    if(!el) return;
+    el.addEventListener('input', ()=>{
+      if(vl) vl.textContent=fmt(el.value);
+      const isIC = ['cth1','cth2','cw1'].includes(id);
+      if(isIC && ge('tog-reset').classList.contains('on')) resetChaos();
+      if(!isIC && id.startsWith('c') && chaosDP) chaosDP.damping=+ge('cdamp').value;
+      scheduleUpdate();
+    });
+  });
+  ge('tog-reset').addEventListener('click', ()=>ge('tog-reset').classList.toggle('on'));
+}
+
+function toggleFree() {
+  freerun = !freerun;
+  ge('tog-free').classList.toggle('on', freerun);
+  const env=ge('env-sliders');
+  env.style.opacity=freerun?'0.3':'1';
+  env.style.pointerEvents=freerun?'none':'';
+  scheduleUpdate();
+}
+
+// ── API ────────────────────────────────────────────────────────────────────
+function buildParams() {
+  if (mode === 'sine') {
+    return {
+      mode:'sine',
+      osc1:{amp:+ge('s1a').value, freq:+ge('s1f').value, phase:+ge('s1p').value},
+      osc2:{amp:+ge('s2a').value, freq:+ge('s2f').value, phase:+ge('s2p').value},
+      envelope: freerun ? null : {
+        attack:+ge('env-a').value, hold:+ge('env-h').value, decay:+ge('env-d').value
+      },
+      speed:+ge('mspd').value,
+    };
+  }
+  return {
+    mode:'chaos',
+    L1:+ge('cL1').value,  L2:+ge('cL2').value,
+    m1:+ge('cm1').value,  m2:+ge('cm2').value,
+    th1:+ge('cth1').value, th2:+ge('cth2').value,
+    w1:+ge('cw1').value,
+    damping:+ge('cdamp').value,
+    scale:+ge('cscale').value,
+    simSpeed:+ge('csim').value,
+    speed:+ge('mspd').value,
+  };
+}
+
+async function doRun() {
+  runT0 = Date.now();
+  if (mode==='chaos') resetChaos();
+  try {
+    await fetch(`${BASE}/api/osc/start`,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(buildParams()), signal:AbortSignal.timeout(4000),
+    });
+  } catch(e){ console.warn(e); }
+}
+
+async function doStop() {
+  runT0=null;
+  try {
+    await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
+  } catch {}
+}
+
+function scheduleUpdate() {
+  clearTimeout(updateTimer);
+  updateTimer = setTimeout(async ()=>{
+    if (!running) return;
+    try {
+      await fetch(`${BASE}/api/osc/update`,{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(buildParams()), signal:AbortSignal.timeout(3000),
+      });
+    } catch {}
+  }, 220);
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+function ge(id){ return document.getElementById(id); }
+function setDot(id,state){
+  const d=ge(id); d.className='dot'+(state?' '+state:'');
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+resizeCanvas();
+window.addEventListener('resize', ()=>{ resizeCanvas(); bob2Trail=[]; phaseTrail=[]; });
+bindSliders();
+connectWS();
+requestAnimationFrame(rafLoop);
+</script>
+</body>
+</html>

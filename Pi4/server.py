@@ -13,6 +13,7 @@ Auto:   sudo systemctl enable whip (see whip.service)
 
 import asyncio
 import json
+import math
 import os
 import serial
 import serial.tools.list_ports
@@ -374,6 +375,151 @@ class SequenceEngine:
 
 engine = SequenceEngine()
 
+# ── Double-pendulum ODE (RK4) ─────────────────────────────────────────────────
+class DoublePendulum:
+    def __init__(self, L1, L2, m1, m2, th1_deg, th2_deg, w1=0.0, damping=0.0):
+        self.L1=L1; self.L2=L2; self.m1=m1; self.m2=m2
+        self.th1=math.radians(th1_deg); self.th2=math.radians(th2_deg)
+        self.w1=w1; self.w2=0.0; self.damping=damping
+
+    def _deriv(self, th1, th2, w1, w2):
+        L1,L2,m1,m2,g = self.L1,self.L2,self.m1,self.m2,9.81
+        D = 2*m1+m2-m2*math.cos(2*th1-2*th2)
+        dw1 = (-g*(2*m1+m2)*math.sin(th1)
+               -m2*g*math.sin(th1-2*th2)
+               -2*math.sin(th1-th2)*m2*(w2**2*L2+w1**2*L1*math.cos(th1-th2))
+               ) / (L1*D)
+        dw2 = (2*math.sin(th1-th2)*(w1**2*L1*(m1+m2)
+               +g*(m1+m2)*math.cos(th1)
+               +w2**2*L2*m2*math.cos(th1-th2))
+               ) / (L2*D)
+        return w1, w2, dw1-self.damping*w1, dw2-self.damping*w2
+
+    def step(self, dt):
+        th1,th2,w1,w2 = self.th1,self.th2,self.w1,self.w2
+        k1 = self._deriv(th1,th2,w1,w2)
+        k2 = self._deriv(th1+k1[0]*dt/2,th2+k1[1]*dt/2,w1+k1[2]*dt/2,w2+k1[3]*dt/2)
+        k3 = self._deriv(th1+k2[0]*dt/2,th2+k2[1]*dt/2,w1+k2[2]*dt/2,w2+k2[3]*dt/2)
+        k4 = self._deriv(th1+k3[0]*dt,  th2+k3[1]*dt,  w1+k3[2]*dt,  w2+k3[3]*dt)
+        self.th1 += dt/6*(k1[0]+2*k2[0]+2*k3[0]+k4[0])
+        self.th2 += dt/6*(k1[1]+2*k2[1]+2*k3[1]+k4[1])
+        self.w1  += dt/6*(k1[2]+2*k2[2]+2*k3[2]+k4[2])
+        self.w2  += dt/6*(k1[3]+2*k2[3]+2*k3[3]+k4[3])
+
+# ── Oscillator engine ─────────────────────────────────────────────────────────
+class OscillatorEngine:
+    RATE    = 15        # Hz — move commands sent to Pico
+    SIM_DT  = 0.003    # chaos ODE integration step (s)
+    MAX_DEG = 105
+
+    def __init__(self):
+        self.running      = False
+        self.current_angle= 0.0
+        self.params       = {}
+        self._gen         = 0
+        self._task        = None
+
+    def start(self, params: dict, event_loop):
+        self._gen += 1
+        gen = self._gen
+        if self._task and not self._task.done():
+            self._task.cancel()
+        engine.stop()              # silence sequence engine if running
+        serial_mgr.flush_and_stop()
+        time.sleep(0.12)
+        self.params = params.copy()
+        self._task = asyncio.run_coroutine_threadsafe(
+            self._run(params, gen), event_loop
+        )
+
+    def update(self, params: dict):
+        self.params.update(params)
+
+    def stop(self):
+        self._gen += 1
+        if self._task and not self._task.done():
+            self._task.cancel()
+        serial_mgr.flush_and_stop()
+        self.running = False
+
+    async def _run(self, initial_params, gen):
+        self.running = True
+        DT = 1.0 / self.RATE
+
+        # Motor setup: disable ramps for smooth continuous tracking
+        for cmd in ("on", "angle 105", "softstartoff", "brakeoff"):
+            serial_mgr.send(cmd)
+            await asyncio.sleep(0.04)
+
+        mode = initial_params.get('mode', 'sine')
+        dp   = None
+        if mode == 'chaos':
+            p  = self.params
+            dp = DoublePendulum(
+                L1=p.get('L1',1.0), L2=p.get('L2',0.8),
+                m1=p.get('m1',1.0), m2=p.get('m2',0.8),
+                th1_deg=p.get('th1',130), th2_deg=p.get('th2',95),
+                w1=p.get('w1',0.0), damping=p.get('damping',0.01)
+            )
+
+        t0        = time.time()
+        next_tick = t0
+        last_speed = -1
+
+        try:
+            while self._gen == gen:
+                now = time.time()
+                t   = now - t0
+                p   = self.params
+
+                speed = int(p.get('speed', 2000))
+                if speed != last_speed:
+                    serial_mgr.send(f"speed {speed}")
+                    last_speed = speed
+
+                if mode == 'sine':
+                    angle = self._sine(t, p)
+                elif mode == 'chaos' and dp is not None:
+                    dp.damping   = p.get('damping', 0.01)
+                    sim_speed    = p.get('simSpeed', 1.0)
+                    steps_needed = max(1, round(DT * sim_speed / self.SIM_DT))
+                    for _ in range(steps_needed):
+                        dp.step(self.SIM_DT)
+                    scale = p.get('scale', 0.58)
+                    angle = max(-self.MAX_DEG,
+                                min(self.MAX_DEG, math.degrees(dp.th1) * scale))
+                else:
+                    angle = 0.0
+
+                self.current_angle = angle
+                steps = int(angle * GEAR_RATIO / 360.0 * PULSES_PER_REV)
+                serial_mgr.send(f"move {steps}")
+
+                next_tick += DT
+                await asyncio.sleep(max(0.0, next_tick - time.time()))
+        finally:
+            self.running = False
+
+    @staticmethod
+    def _sine(t, p):
+        o1  = p.get('osc1', {})
+        o2  = p.get('osc2', {})
+        A1  = o1.get('amp',80);  f1=o1.get('freq',0.4); ph1=math.radians(o1.get('phase',0))
+        A2  = o2.get('amp',25);  f2=o2.get('freq',1.1); ph2=math.radians(o2.get('phase',90))
+        raw = A1*math.sin(2*math.pi*f1*t+ph1) + A2*math.sin(2*math.pi*f2*t+ph2)
+
+        env = p.get('envelope')
+        if env is None:
+            return raw
+        atk=env.get('attack',8); hld=env.get('hold',30); dcy=env.get('decay',10)
+        if   t < atk:       factor = t/atk if atk>0 else 1
+        elif t < atk+hld:   factor = 1.0
+        else:
+            dt = t-atk-hld; factor = max(0.0, 1-dt/dcy) if dcy>0 else 0
+        return raw * factor
+
+osc_engine = OscillatorEngine()
+
 # ── WebSocket broadcaster ─────────────────────────────────────────────────────
 ws_clients: set = set()
 
@@ -398,6 +544,10 @@ async def broadcast_loop():
                 "step":    engine.step_index,
                 "total":   engine.total_steps,
                 "loop":    engine.loop_mode,
+            },
+            "osc": {
+                "running": osc_engine.running,
+                "angle":   round(osc_engine.current_angle, 2),
             },
             "serial": serial_mgr.connected,
         })
@@ -561,6 +711,16 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
+        if path == "/chaos":
+            f = Path(__file__).parent / "chaos.html"
+            data = f.read_bytes() if f.exists() else b"<h1>chaos.html not found</h1>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         if path == "/stream":
             if not CAMERA_AVAILABLE or not camera_mgr.running:
                 self.send_json({"error": "camera not available"}, 503)
@@ -664,6 +824,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/stop":
             engine.stop()
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/osc/start":
+            osc_engine.start(data, _event_loop)
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/osc/update":
+            osc_engine.update(data)
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/osc/stop":
+            osc_engine.stop()
             self.send_json({"ok": True})
             return
 
