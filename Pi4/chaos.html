@@ -272,23 +272,26 @@ let updateTimer = null;
 // ── WebSocket ──────────────────────────────────────────────────────────────
 let ws = null;
 function connectWS() {
-  ws = new WebSocket(WS_URL);
-  ws.onopen  = () => setDot('dot-ws', 'on');
-  ws.onclose = () => { setDot('dot-ws', false); setTimeout(connectWS, 2000); };
-  ws.onerror = () => setDot('dot-ws', false);
-  ws.onmessage = e => {
-    try {
-      const d = JSON.parse(e.data);
-      setDot('dot-serial', d.serial ? 'on' : false);
-      if (d.osc !== undefined) {
-        running = d.osc.running;
-        ge('badge').classList.toggle('on', running);
-        if (d.osc.running && d.osc.angle !== undefined) {
-          updatePosBar(d.osc.angle);
+  if (!location.hostname) return; // opened as file://, no server available
+  try {
+    ws = new WebSocket(WS_URL);
+    ws.onopen  = () => setDot('dot-ws', 'on');
+    ws.onclose = () => { setDot('dot-ws', false); setTimeout(connectWS, 2000); };
+    ws.onerror = () => setDot('dot-ws', false);
+    ws.onmessage = e => {
+      try {
+        const d = JSON.parse(e.data);
+        setDot('dot-serial', d.serial ? 'on' : false);
+        if (d.osc !== undefined) {
+          running = d.osc.running;
+          ge('badge').classList.toggle('on', running);
+          if (d.osc.running && d.osc.angle !== undefined) {
+            updatePosBar(d.osc.angle);
+          }
         }
-      }
-    } catch {}
-  };
+      } catch {}
+    };
+  } catch { setDot('dot-ws', false); }
 }
 
 // ── Tab switching ──────────────────────────────────────────────────────────
@@ -364,23 +367,27 @@ function resetChaos() {
 const canvas = ge('viz');
 const ctx    = canvas.getContext('2d');
 
-function resizeCanvas() {
-  const r = devicePixelRatio || 1;
-  const w = canvas.clientWidth;
-  const h = 200;
-  canvas.width  = w*r; canvas.height = h*r;
-  ctx.scale(r,r);
-  canvas.style.height = h+'px';
-}
-
+let _canvasW = 0;
 function rafLoop(ts) {
   requestAnimationFrame(rafLoop);
-  const dt = Math.min((ts-lastRaf)/1000, 0.05);
+  const dt = Math.min((ts - lastRaf) / 1000, 0.05);
   lastRaf = ts;
-  const W = canvas.clientWidth, H = 200;
-  ctx.clearRect(0,0,W,H);
-  if (mode==='sine') drawSine(W,H,dt);
-  else               drawChaos(W,H,dt);
+
+  // Self-heal canvas size every frame — handles file://, late layout, resize
+  const r  = devicePixelRatio || 1;
+  const cw = canvas.clientWidth;
+  if (cw && cw !== _canvasW) {
+    _canvasW      = cw;
+    canvas.width  = cw * r;
+    canvas.height = 200 * r;
+    ctx.setTransform(r, 0, 0, r, 0, 0);
+  }
+  if (!_canvasW) return;
+
+  const W = _canvasW, H = 200;
+  ctx.clearRect(0, 0, W, H);
+  if (mode === 'sine') drawSine(W, H, dt);
+  else                 drawChaos(W, H, dt);
 }
 
 // ── Sine canvas ────────────────────────────────────────────────────────────
@@ -684,8 +691,7 @@ function setDot(id,state){
 }
 
 // ── Init ───────────────────────────────────────────────────────────────────
-resizeCanvas();
-window.addEventListener('resize', ()=>{ resizeCanvas(); bob2Trail=[]; phaseTrail=[]; });
+window.addEventListener('resize', () => { _canvasW = 0; bob2Trail = []; phaseTrail = []; });
 bindSliders();
 connectWS();
 requestAnimationFrame(rafLoop);
