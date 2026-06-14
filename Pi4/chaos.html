@@ -344,7 +344,8 @@ const TAU    = Math.PI * 2;
 const MAX_DEG = 105;
 
 // ── State ──────────────────────────────────────────────────────────────────
-let mode = 'sine';
+let tab  = 'sine';         // visible tab: sine | chaos | presets | timeline
+let mode = 'sine';         // engine mode: sine | chaos (only changes on sine/chaos tabs)
 let running = false;
 let freerun = true;
 let limitActive = true;    // enforce travel limit toggle
@@ -355,6 +356,8 @@ let phaseTrail = [];       // [{th, w}] for phase portrait
 let lastRaf = 0;
 let updateTimer = null;
 let activeTimeline = false; // running timeline sequence
+let tlTimer = null;         // interval pushing interpolated timeline params
+const TL_PUSH_MS = 200;     // how often timeline params are pushed to server
 
 // ── Presets & Timeline ──────────────────────────────────────────────────────
 let presets = {};          // {name: {cL1, cL2, cm1, cm2, cth1, cth2, cw1, cdamp}}
@@ -374,9 +377,8 @@ function loadPresetsFromStorage() {
 function savePreset() {
   const name = ge('preset-name-input').value.trim();
   if (!name) return;
-  const activeMode = (mode === 'sine' || mode === 'chaos') ? mode : 'chaos';
   presets[name] = {
-    mode: activeMode,
+    mode,   // engine mode at time of save (sine | chaos), preserved across Presets/Timeline tabs
     // sine
     s1a: +ge('s1a').value, s1f: +ge('s1f').value, s1p: +ge('s1p').value,
     s2a: +ge('s2a').value, s2f: +ge('s2f').value, s2p: +ge('s2p').value,
@@ -529,7 +531,8 @@ function connectWS() {
 
 // ── Tab switching ──────────────────────────────────────────────────────────
 function switchTab(t) {
-  mode = t;
+  tab = t;
+  if (t === 'sine' || t === 'chaos') mode = t;   // engine mode only tracks sine/chaos
   ge('tab-sine').classList.toggle('active', t === 'sine');
   ge('tab-chaos').classList.toggle('active', t === 'chaos');
   ge('tab-presets').classList.toggle('active', t === 'presets');
@@ -1118,8 +1121,8 @@ function buildParams() {
 }
 
 async function doRun() {
-  // If on timeline tab and timeline has items, run timeline
-  activeTimeline = (mode === 'timeline' && timeline.length > 0);
+  // Run the timeline if the Timeline tab is showing and has items
+  activeTimeline = (tab === 'timeline' && timeline.length > 0);
 
   runT0 = Date.now();
   if (mode==='chaos' || activeTimeline) {
@@ -1131,10 +1134,25 @@ async function doRun() {
       body:JSON.stringify(buildParams()), signal:AbortSignal.timeout(4000),
     });
   } catch(e){ console.warn(e); }
+
+  // Timeline morphs params over time — push interpolated values to the server
+  // continuously (slider-driven scheduleUpdate doesn't fire during playback).
+  clearInterval(tlTimer);
+  if (activeTimeline) {
+    tlTimer = setInterval(()=>{
+      if (!running || !activeTimeline || runT0 === null) return;
+      fetch(`${BASE}/api/osc/update`,{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(buildParams()), signal:AbortSignal.timeout(3000),
+      }).catch(()=>{});
+    }, TL_PUSH_MS);
+  }
 }
 
 async function doStop() {
   runT0=null;
+  activeTimeline=false;
+  clearInterval(tlTimer);
   try {
     await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
   } catch {}

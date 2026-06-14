@@ -453,16 +453,19 @@ class OscillatorEngine:
             serial_mgr.send(cmd)
             await asyncio.sleep(0.04)
 
-        mode = initial_params.get('mode', 'sine')
-        dp   = None
-        if mode == 'chaos':
-            p  = self.params
-            dp = DoublePendulum(
+        init_mode = initial_params.get('mode', 'sine')
+        dp        = None
+
+        def _make_dp(p):
+            return DoublePendulum(
                 L1=p.get('L1',1.0), L2=p.get('L2',0.8),
                 m1=p.get('m1',1.0), m2=p.get('m2',0.8),
                 th1_deg=p.get('th1',130), th2_deg=p.get('th2',95),
                 w1=p.get('w1',0.0), damping=p.get('damping',0.01)
             )
+
+        if init_mode == 'chaos':
+            dp = _make_dp(self.params)
 
         t0        = time.time()
         next_tick = t0
@@ -479,20 +482,22 @@ class OscillatorEngine:
                     serial_mgr.send(f"speed {speed}")
                     last_speed = speed
 
-                if mode == 'sine':
-                    lim   = max(10, min(105, int(p.get('limit', 90))))
-                    angle = max(-lim, min(lim, self._sine(t, p)))
-                elif mode == 'chaos' and dp is not None:
+                # Mode can change tick-to-tick (timeline sequencing sine↔chaos)
+                mode = p.get('mode', init_mode)
+                lim  = max(10, min(105, int(p.get('limit', 90))))
+
+                if mode == 'chaos':
+                    if dp is None:               # entered chaos mid-run — seed now
+                        dp = _make_dp(p)
                     dp.damping   = p.get('damping', 0.01)
                     sim_speed    = p.get('simSpeed', 1.0)
                     steps_needed = max(1, round(DT * sim_speed / self.SIM_DT))
                     for _ in range(steps_needed):
                         dp.step(self.SIM_DT)
-                    scale    = p.get('scale', 0.58)
-                    lim      = max(10, min(105, int(p.get('limit', 90))))
-                    angle    = max(-lim, min(lim, math.degrees(dp.th1) * scale))
-                else:
-                    angle = 0.0
+                    scale = p.get('scale', 0.58)
+                    angle = max(-lim, min(lim, math.degrees(dp.th1) * scale))
+                else:  # sine
+                    angle = max(-lim, min(lim, self._sine(t, p)))
 
                 self.current_angle = angle
                 steps = int(angle * GEAR_RATIO / 360.0 * PULSES_PER_REV)
