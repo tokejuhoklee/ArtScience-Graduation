@@ -74,7 +74,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
   color:#c0c0e0;cursor:pointer;font-size:9px;flex-shrink:0}
 .preset-btn:hover{background:#2a2a42}
 
-.timeline-item{display:grid;grid-template-columns:80px 1fr 50px 50px;gap:6px;padding:8px;
+.timeline-item{display:grid;grid-template-columns:1fr 40px 60px 45px;gap:6px;padding:8px;
   background:#04040a;border:1px solid #1c1c30;border-radius:5px;align-items:center;font-size:10px}
 .timeline-preset{color:#9c7cff;text-overflow:ellipsis;overflow:hidden}
 .timeline-duration{padding:4px 8px;background:#181828;border:1px solid #2a2a42;border-radius:3px;
@@ -270,7 +270,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     </div>
     <div class="card">
       <span class="card-label">Add Preset to Timeline</span>
-      <div style="display:grid;grid-template-columns:1fr 70px;gap:6px">
+      <div style="display:grid;grid-template-columns:1fr 55px 85px;gap:6px">
         <select id="timeline-preset-select" style="padding:8px;background:#04040a;border:1px solid #181828;
           border-radius:4px;color:#c0c0e0;font-family:monospace;font-size:10px">
           <option value="">— select preset —</option>
@@ -279,6 +279,13 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
           style="padding:8px;background:#04040a;border:1px solid #181828;border-radius:4px;
           color:#c0c0e0;font-family:monospace;font-size:10px;text-align:center"
           title="transition duration (seconds)">
+        <select id="timeline-easing" style="padding:8px;background:#04040a;border:1px solid #181828;
+          border-radius:4px;color:#c0c0e0;font-family:monospace;font-size:10px">
+          <option value="linear">linear</option>
+          <option value="ease-in">ease in</option>
+          <option value="ease-in-out" selected>ease in-out</option>
+          <option value="ease-out">ease out</option>
+        </select>
       </div>
       <div class="btn" onclick="addToTimeline()" style="margin-top:6px;padding:8px">+ Add to Timeline</div>
     </div>
@@ -367,15 +374,19 @@ function loadPresetsFromStorage() {
 function savePreset() {
   const name = ge('preset-name-input').value.trim();
   if (!name) return;
+  const activeMode = (mode === 'sine' || mode === 'chaos') ? mode : 'chaos';
   presets[name] = {
-    cL1: +ge('cL1').value,
-    cL2: +ge('cL2').value,
-    cm1: +ge('cm1').value,
-    cm2: +ge('cm2').value,
-    cth1: +ge('cth1').value,
-    cth2: +ge('cth2').value,
-    cw1: +ge('cw1').value,
-    cdamp: +ge('cdamp').value,
+    mode: activeMode,
+    // sine
+    s1a: +ge('s1a').value, s1f: +ge('s1f').value, s1p: +ge('s1p').value,
+    s2a: +ge('s2a').value, s2f: +ge('s2f').value, s2p: +ge('s2p').value,
+    freerun, envA: +ge('env-a').value, envH: +ge('env-h').value, envD: +ge('env-d').value,
+    // chaos
+    cL1: +ge('cL1').value, cL2: +ge('cL2').value,
+    cm1: +ge('cm1').value, cm2: +ge('cm2').value,
+    cth1: +ge('cth1').value, cth2: +ge('cth2').value,
+    cw1: +ge('cw1').value, cdamp: +ge('cdamp').value,
+    cscale: +ge('cscale').value, csim: +ge('csim').value,
     timestamp: new Date().toLocaleString()
   };
   localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
@@ -387,19 +398,37 @@ function savePreset() {
 function loadPreset(name) {
   const p = presets[name];
   if (!p) return;
-  ge('cL1').value = p.cL1;
-  ge('cL2').value = p.cL2;
-  ge('cm1').value = p.cm1;
-  ge('cm2').value = p.cm2;
-  ge('cth1').value = p.cth1;
-  ge('cth2').value = p.cth2;
-  ge('cw1').value = p.cw1;
-  ge('cdamp').value = p.cdamp;
 
-  // Update display values
-  ['cL1','cL2','cm1','cm2','cth1','cth2','cw1','cdamp'].forEach(id=>{
-    const fmt = SLIDERS.find(s=>s[0]===id)?.[1];
-    if (fmt) ge(id+'-v').textContent = fmt(ge(id).value);
+  // Switch to preset's mode if different
+  const targetMode = p.mode || 'chaos';
+  if (targetMode !== mode && (targetMode === 'sine' || targetMode === 'chaos')) switchTab(targetMode);
+
+  // Restore sine params
+  ['s1a','s1f','s1p','s2a','s2f','s2p'].forEach(id => {
+    if (p[id] !== undefined) {
+      ge(id).value = p[id];
+      const fmt = SLIDERS.find(s=>s[0]===id)?.[1];
+      if (fmt) ge(id+'-v').textContent = fmt(ge(id).value);
+    }
+  });
+  if (p.envA !== undefined) { ge('env-a').value = p.envA; ge('env-a-v').textContent = (+p.envA).toFixed(1)+' s'; }
+  if (p.envH !== undefined) { ge('env-h').value = p.envH; ge('env-h-v').textContent = p.envH+' s'; }
+  if (p.envD !== undefined) { ge('env-d').value = p.envD; ge('env-d-v').textContent = (+p.envD).toFixed(1)+' s'; }
+  if (p.freerun !== undefined) {
+    freerun = p.freerun;
+    ge('tog-free').classList.toggle('on', freerun);
+    const env = ge('env-sliders');
+    env.style.opacity = freerun ? '0.3' : '1';
+    env.style.pointerEvents = freerun ? 'none' : '';
+  }
+
+  // Restore chaos params
+  ['cL1','cL2','cm1','cm2','cth1','cth2','cw1','cdamp','cscale','csim'].forEach(id => {
+    if (p[id] !== undefined) {
+      ge(id).value = p[id];
+      const fmt = SLIDERS.find(s=>s[0]===id)?.[1];
+      if (fmt) ge(id+'-v').textContent = fmt(ge(id).value);
+    }
   });
 
   if (ge('tog-reset').classList.contains('on')) resetChaos();
@@ -415,15 +444,19 @@ function deletePreset(name) {
 function updatePresetsUI() {
   const list = ge('presets-list');
   const names = Object.keys(presets).sort();
-  list.innerHTML = names.map(name => `
-    <div class="preset-item">
+  list.innerHTML = names.map(name => {
+    const p = presets[name];
+    const modeTag = (p.mode === 'sine') ? '~' : '∞';
+    const modeColor = (p.mode === 'sine') ? '#5c7cfc' : '#9c7cff';
+    return `<div class="preset-item">
+      <span style="color:${modeColor};font-size:11px;min-width:12px">${modeTag}</span>
       <span class="preset-name">${name}</span>
-      <span class="preset-time">${presets[name].timestamp || ''}</span>
+      <span class="preset-time">${p.timestamp || ''}</span>
       <div class="preset-btn" onclick="loadPreset('${name}')">Load</div>
       <div class="preset-btn" style="background:#6c2c2c;border-color:#8c4c4c;color:#ec6c6c"
         onclick="deletePreset('${name}')">Delete</div>
-    </div>
-  `).join('');
+    </div>`;
+  }).join('');
   if (names.length === 0) list.innerHTML = '<div style="color:#4a4a6a;font-size:9px;padding:8px">No presets saved</div>';
 }
 
@@ -438,7 +471,8 @@ function addToTimeline() {
   const name = ge('timeline-preset-select').value;
   if (!name) return;
   const dur = +ge('timeline-duration').value;
-  timeline.push({presetName: name, duration: dur});
+  const easing = ge('timeline-easing').value;
+  timeline.push({presetName: name, duration: dur, easing});
   localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
   updateTimelineUI();
 }
@@ -454,14 +488,17 @@ function updateTimelineUI() {
   const dur = timeline.reduce((s,t)=>s+t.duration, 0);
   ge('timeline-total-duration').textContent = dur.toFixed(1);
 
-  list.innerHTML = timeline.map((t,i) => `
-    <div class="timeline-item">
-      <span class="timeline-preset">${t.presetName}</span>
-      <span style="font-size:9px;color:#4a4a6a">→</span>
-      <span class="timeline-duration">${t.duration}s</span>
-      <div class="timeline-del" onclick="removeFromTimeline(${i})">Delete</div>
-    </div>
-  `).join('');
+  list.innerHTML = timeline.map((t,i) => {
+    const p = presets[t.presetName];
+    const modeTag = p ? ((p.mode==='sine') ? '~' : '∞') : '?';
+    const modeColor = p ? ((p.mode==='sine') ? '#5c7cfc' : '#9c7cff') : '#4a4a6a';
+    return `<div class="timeline-item">
+      <span style="color:${modeColor}">${modeTag} ${t.presetName}</span>
+      <span style="font-size:9px;color:#4a4a6a">${t.duration}s</span>
+      <span style="font-size:9px;color:#3a3a52">${t.easing||'linear'}</span>
+      <div class="timeline-del" onclick="removeFromTimeline(${i})">Del</div>
+    </div>`;
+  }).join('');
   if (timeline.length === 0) list.innerHTML = '<div style="color:#4a4a6a;font-size:9px;padding:8px">No timeline items yet</div>';
 }
 
@@ -599,98 +636,144 @@ const WINDOW = 14; // seconds shown ahead
 function drawSine(W, H, dt) {
   const t   = runT0 !== null ? (Date.now()-runT0)/1000 : 0;
   const lim = motorLimit();
-  const mid = H/2, scale = (mid-12)/MAX_DEG;
+  const cur = sineVal(t)*envVal(t);
+  const clampedCur = limitActive ? Math.max(-lim, Math.min(lim, cur)) : cur;
+  const isClamped  = limitActive && Math.abs(cur) > lim;
 
-  // hard-limit band (red tint beyond ±lim) — only show if limitActive
+  const split = Math.round(W * 0.36);
+  const waveW = W - split;
+  const mid   = H/2;
+  const scale = (mid-12)/MAX_DEG;
+
+  // ── Left: arm fan ──────────────────────────────────────────────
+  const cx   = split * 0.5;
+  const cy   = H * 0.44;
+  const fanR = Math.min(split * 0.78, H * 0.60);
+  const limRad = lim * Math.PI / 180;
+
+  if (limitActive) {
+    ctx.fillStyle = isClamped ? 'rgba(200,40,40,0.07)' : 'rgba(40,180,80,0.06)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.arc(cx, cy, fanR, -Math.PI/2-limRad, -Math.PI/2+limRad);
+    ctx.closePath(); ctx.fill();
+
+    ctx.strokeStyle = isClamped ? 'rgba(220,60,60,0.4)' : 'rgba(60,180,80,0.2)';
+    ctx.lineWidth = 1; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+Math.sin(-limRad)*fanR, cy-Math.cos(limRad)*fanR); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(cx,cy);
+    ctx.lineTo(cx+Math.sin(limRad)*fanR,  cy-Math.cos(limRad)*fanR); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.strokeStyle = isClamped ? 'rgba(220,60,60,0.3)' : 'rgba(60,180,80,0.15)';
+    ctx.beginPath(); ctx.arc(cx,cy,fanR,-Math.PI/2-limRad,-Math.PI/2+limRad); ctx.stroke();
+  }
+
+  const armRad = clampedCur * Math.PI / 180;
+  const axEnd  = cx + Math.sin(armRad)*fanR*0.9;
+  const ayEnd  = cy - Math.cos(armRad)*fanR*0.9;
+  ctx.strokeStyle = isClamped ? '#fc4c4c' : '#7c5cfc';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(axEnd,ayEnd); ctx.stroke();
+  ctx.fillStyle = '#3a3a58';
+  ctx.beginPath(); ctx.arc(cx,cy,4,0,TAU); ctx.fill();
+  ctx.fillStyle = isClamped ? '#fc4c4c' : '#9c7cff';
+  ctx.beginPath(); ctx.arc(axEnd,ayEnd,4.5,0,TAU); ctx.fill();
+
+  ctx.fillStyle = '#4a4a6a'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
+  ctx.fillText(clampedCur.toFixed(1)+'°', cx, cy+fanR*0.95+13);
+
+  // Divider
+  ctx.strokeStyle = '#141428'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(split,4); ctx.lineTo(split,H-4); ctx.stroke();
+
+  // ── Right: waveform ────────────────────────────────────────────
   if (limitActive) {
     const limY = lim*scale;
-    ctx.fillStyle='rgba(200,40,40,0.07)';
-    ctx.fillRect(0, 0,    W, mid-limY);
-    ctx.fillRect(0, mid+limY, W, H-(mid+limY));
-
-    // limit lines
-    ctx.strokeStyle='rgba(200,60,60,0.4)'; ctx.lineWidth=1;
+    ctx.fillStyle = 'rgba(200,40,40,0.07)';
+    ctx.fillRect(split, 0, waveW, mid-limY);
+    ctx.fillRect(split, mid+limY, waveW, H-(mid+limY));
+    ctx.strokeStyle = 'rgba(200,60,60,0.4)'; ctx.lineWidth = 1;
     ctx.setLineDash([4,4]);
-    ctx.beginPath(); ctx.moveTo(0,mid-limY); ctx.lineTo(W,mid-limY); ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(0,mid+limY); ctx.lineTo(W,mid+limY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(split,mid-limY); ctx.lineTo(W,mid-limY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(split,mid+limY); ctx.lineTo(W,mid+limY); ctx.stroke();
     ctx.setLineDash([]);
   }
 
-  // grid
   ctx.strokeStyle='#0d0d1c'; ctx.lineWidth=1;
   [-90,-60,-30,30,60,90].forEach(a => {
     const y=mid-a*scale;
-    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(split,y); ctx.lineTo(W,y); ctx.stroke();
   });
   ctx.strokeStyle='#1c1c30'; ctx.lineWidth=1.5;
-  ctx.beginPath(); ctx.moveTo(0,mid); ctx.lineTo(W,mid); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(split,mid); ctx.lineTo(W,mid); ctx.stroke();
 
-  // envelope band
   if (!freerun) {
     ctx.fillStyle='rgba(124,92,252,0.06)';
     ctx.beginPath();
     const envLim = limitActive ? lim : MAX_DEG;
-    for(let px=0;px<=W;px++){
-      const ev=envVal(t+px/W*WINDOW)*envLim*scale;
-      px===0 ? ctx.moveTo(px,mid-ev) : ctx.lineTo(px,mid-ev);
+    for(let px=0;px<=waveW;px++){
+      const ev=envVal(t+px/waveW*WINDOW)*envLim*scale;
+      const x=split+px;
+      px===0 ? ctx.moveTo(x,mid-ev) : ctx.lineTo(x,mid-ev);
     }
-    for(let px=W;px>=0;px--){
-      const ev=envVal(t+px/W*WINDOW)*envLim*scale;
-      ctx.lineTo(px,mid+ev);
+    for(let px=waveW;px>=0;px--){
+      const ev=envVal(t+px/waveW*WINDOW)*envLim*scale;
+      ctx.lineTo(split+px,mid+ev);
     }
     ctx.closePath(); ctx.fill();
   }
 
-  // osc 1 contribution (dim blue) — clipped to limit if limitActive
-  waveLine(W,mid,scale,lim,t,tx=>{
+  waveLine(split,waveW,mid,scale,lim,t,tx=>{
     const A=+ge('s1a').value,f=+ge('s1f').value,p=+ge('s1p').value*Math.PI/180;
     return A*Math.sin(TAU*f*tx+p)*envVal(tx);
   },'rgba(92,124,252,0.35)',1.5);
-
-  // osc 2 contribution (dim pink) — clipped to limit if limitActive
-  waveLine(W,mid,scale,lim,t,tx=>{
+  waveLine(split,waveW,mid,scale,lim,t,tx=>{
     const A=+ge('s2a').value,f=+ge('s2f').value,p=+ge('s2p').value*Math.PI/180;
     return A*Math.sin(TAU*f*tx+p)*envVal(tx);
   },'rgba(252,92,156,0.35)',1.5);
+  waveLine(split,waveW,mid,scale,lim,t,tx=>sineVal(tx)*envVal(tx),'#9c7cff',2);
 
-  // combined — clipped to limit if limitActive (bright purple inside, red outside)
-  waveLine(W,mid,scale,lim,t,tx=>sineVal(tx)*envVal(tx),'#9c7cff',2);
-
-  // time cursor
-  ctx.strokeStyle='rgba(252,156,76,0.5)'; ctx.lineWidth=1;
-  ctx.setLineDash([3,4]);
-  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,H); ctx.stroke();
+  // time cursor at left edge of waveform
+  ctx.strokeStyle='rgba(252,156,76,0.5)'; ctx.lineWidth=1; ctx.setLineDash([3,4]);
+  ctx.beginPath(); ctx.moveTo(split,0); ctx.lineTo(split,H); ctx.stroke();
   ctx.setLineDash([]);
 
-  // current dot + value
-  const cur = sineVal(t)*envVal(t);
-  const clampedCur = limitActive ? Math.max(-lim, Math.min(lim, cur)) : cur;
-  const cy = mid - clampedCur*scale;
-  // dot: orange if within limit, red if clamped
-  const isClamped = limitActive && Math.abs(cur) > lim;
+  // current dot on waveform edge
+  const cy2 = mid - clampedCur*scale;
   ctx.fillStyle = isClamped ? '#fc4c4c' : '#fc9c4c';
-  ctx.beginPath(); ctx.arc(0,cy,4.5,0,TAU); ctx.fill();
+  ctx.beginPath(); ctx.arc(split,cy2,4.5,0,TAU); ctx.fill();
 
-  // y labels
   ctx.fillStyle='#2a2a42'; ctx.font='9px monospace'; ctx.textAlign='left';
   [-90,-60,-30,30,60,90].forEach(a=>{
-    ctx.fillText(a+'°',3,mid-a*scale-2);
+    ctx.fillText(a+'°', split+3, mid-a*scale-2);
   });
 
-  if (runT0 === null) updatePosBar(0, lim);
-  else updatePosBar(clampedCur, lim);
+  updatePosBar(runT0 === null ? 0 : clampedCur, lim);
 }
 
-function waveLine(W,mid,scale,lim,t0,fn,color,lw) {
+function waveLine(xOff,W,mid,scale,lim,t0,fn,color,lw) {
   ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.beginPath();
   for(let px=0;px<=W;px++){
     const tx  = t0+px/W*WINDOW;
     const raw = fn(tx);
     const clamped = limitActive ? Math.max(-lim,Math.min(lim,raw)) : raw;
     const y   = mid - clamped*scale;
-    px===0 ? ctx.moveTo(px,y) : ctx.lineTo(px,y);
+    const x   = xOff + px;
+    px===0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
   }
   ctx.stroke();
+}
+
+// ── Easing ─────────────────────────────────────────────────────────────────
+const EASINGS = {
+  linear:       t => t,
+  'ease-in':    t => t*t,
+  'ease-out':   t => t*(2-t),
+  'ease-in-out':t => t<.5 ? 2*t*t : -1+(4-2*t)*t,
+};
+function applyEasing(t, name) {
+  return (EASINGS[name] || EASINGS.linear)(Math.max(0, Math.min(1, t)));
 }
 
 // ── Chaos canvas ───────────────────────────────────────────────────────────
@@ -866,25 +949,28 @@ function getTimelineParams(elapsedS) {
     const item = timeline[i];
     const nextAcc = acc + item.duration;
     if (elapsedS < nextAcc) {
-      // Interpolate between current and next preset
-      const t = (elapsedS - acc) / item.duration;
+      const rawT = (elapsedS - acc) / item.duration;
+      const t = applyEasing(rawT, item.easing || 'linear');
       const current = presets[item.presetName];
       const next = i+1 < timeline.length ? presets[timeline[i+1].presetName] : current;
       if (!current || !next) return null;
+      const ip = (a, b) => interpolate(a ?? 0, b ?? 0, t);
       return {
-        cL1: interpolate(current.cL1, next.cL1, t),
-        cL2: interpolate(current.cL2, next.cL2, t),
-        cm1: interpolate(current.cm1, next.cm1, t),
-        cm2: interpolate(current.cm2, next.cm2, t),
-        cth1: interpolate(current.cth1, next.cth1, t),
-        cth2: interpolate(current.cth2, next.cth2, t),
-        cw1: interpolate(current.cw1, next.cw1, t),
-        cdamp: interpolate(current.cdamp, next.cdamp, t),
+        mode: current.mode || 'chaos',
+        // sine
+        s1a: ip(current.s1a, next.s1a), s1f: ip(current.s1f, next.s1f), s1p: ip(current.s1p, next.s1p),
+        s2a: ip(current.s2a, next.s2a), s2f: ip(current.s2f, next.s2f), s2p: ip(current.s2p, next.s2p),
+        envA: ip(current.envA, next.envA), envH: ip(current.envH, next.envH), envD: ip(current.envD, next.envD),
+        // chaos
+        cL1: ip(current.cL1, next.cL1), cL2: ip(current.cL2, next.cL2),
+        cm1: ip(current.cm1, next.cm1), cm2: ip(current.cm2, next.cm2),
+        cth1: ip(current.cth1, next.cth1), cth2: ip(current.cth2, next.cth2),
+        cw1: ip(current.cw1, next.cw1), cdamp: ip(current.cdamp, next.cdamp),
+        cscale: ip(current.cscale, next.cscale), csim: ip(current.csim, next.csim),
       };
     }
     acc = nextAcc;
   }
-  // Timeline complete — use last preset
   const last = presets[timeline[timeline.length-1].presetName];
   return last || null;
 }
@@ -980,6 +1066,32 @@ function motorLimit() { return +ge('mlimit').value; }
 
 function buildParams() {
   const limit = limitActive ? motorLimit() : 105;
+  const speed = +ge('mspd').value;
+
+  // Timeline overrides everything when active
+  if (activeTimeline && timeline.length > 0 && runT0 !== null) {
+    const elapsedS = (Date.now() - runT0) / 1000;
+    const tl = getTimelineParams(elapsedS);
+    if (tl) {
+      if ((tl.mode || 'chaos') === 'sine') {
+        return {
+          mode:'sine',
+          osc1:{amp: tl.s1a??80, freq: tl.s1f??0.4, phase: tl.s1p??0},
+          osc2:{amp: tl.s2a??25, freq: tl.s2f??1.1, phase: tl.s2p??90},
+          envelope: (tl.freerun !== false) ? null : {attack: tl.envA??8, hold: tl.envH??30, decay: tl.envD??10},
+          limit, speed,
+        };
+      }
+      return {
+        mode:'chaos',
+        L1: tl.cL1??1, L2: tl.cL2??0.8, m1: tl.cm1??1, m2: tl.cm2??0.8,
+        th1: tl.cth1??130, th2: tl.cth2??95, w1: tl.cw1??0,
+        damping: tl.cdamp??0.01, scale: tl.cscale??0.58, simSpeed: tl.csim??1,
+        limit, speed,
+      };
+    }
+  }
+
   if (mode === 'sine') {
     return {
       mode:'sine',
@@ -988,12 +1100,12 @@ function buildParams() {
       envelope: freerun ? null : {
         attack:+ge('env-a').value, hold:+ge('env-h').value, decay:+ge('env-d').value
       },
-      limit, speed:+ge('mspd').value,
+      limit, speed,
     };
   }
 
-  // Chaos mode (with optional timeline interpolation)
-  let params = {
+  return {
+    mode:'chaos',
     L1:+ge('cL1').value,  L2:+ge('cL2').value,
     m1:+ge('cm1').value,  m2:+ge('cm2').value,
     th1:+ge('cth1').value, th2:+ge('cth2').value,
@@ -1001,21 +1113,7 @@ function buildParams() {
     damping:+ge('cdamp').value,
     scale:+ge('cscale').value,
     simSpeed:+ge('csim').value,
-  };
-
-  // If timeline is active, interpolate from timeline
-  if (activeTimeline && timeline.length > 0 && runT0 !== null) {
-    const elapsedS = (Date.now() - runT0) / 1000;
-    const tlParams = getTimelineParams(elapsedS);
-    if (tlParams) {
-      params = {...params, ...tlParams};
-    }
-  }
-
-  return {
-    mode:'chaos',
-    ...params,
-    limit, speed:+ge('mspd').value,
+    limit, speed,
   };
 }
 
