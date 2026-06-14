@@ -25,7 +25,7 @@ header{padding:10px 14px 9px;background:#0e0e1a;border-bottom:1px solid #181828;
 .tab.active{color:#9c7cff;border-bottom-color:#7c5cfc}
 
 .scroll{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px;
-  padding-bottom:80px}
+  padding-bottom:120px}
 
 .card{background:#0e0e1a;border:1px solid #181828;border-radius:9px;padding:11px;
   display:flex;flex-direction:column;gap:7px}
@@ -228,12 +228,16 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
   <!-- ── MOTOR ─────────────────────────────────────────────────────── -->
   <div class="card">
     <span class="card-label">Motor</span>
+    <div class="tog-row" style="margin-bottom:6px">
+      <span>Enforce travel limit</span>
+      <div class="tog on" id="tog-limit" onclick="this.classList.toggle('on'); updateLimitState()"></div>
+    </div>
     <div class="prow">
       <span class="plabel">Limit</span>
       <input type="range" id="mlimit" min="10" max="105" step="1" value="90">
       <span class="pval" id="mlimit-v">90°</span>
     </div>
-    <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px">
+    <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px" id="limit-note">
       hard travel cap — keep below physical stop clearance
     </div>
     <div class="prow">
@@ -270,6 +274,7 @@ const MAX_DEG = 105;
 let mode = 'sine';
 let running = false;
 let freerun = true;
+let limitActive = true;    // enforce travel limit toggle
 let runT0 = null;          // browser-side run start (ms)
 let chaosDP = null;
 let bob2Trail = [];        // [{x,y}] canvas coords for pendulum trail
@@ -405,18 +410,20 @@ function drawSine(W, H, dt) {
   const lim = motorLimit();
   const mid = H/2, scale = (mid-12)/MAX_DEG;
 
-  // hard-limit band (red tint beyond ±lim)
-  const limY = lim*scale;
-  ctx.fillStyle='rgba(200,40,40,0.07)';
-  ctx.fillRect(0, 0,    W, mid-limY);
-  ctx.fillRect(0, mid+limY, W, H-(mid+limY));
+  // hard-limit band (red tint beyond ±lim) — only show if limitActive
+  if (limitActive) {
+    const limY = lim*scale;
+    ctx.fillStyle='rgba(200,40,40,0.07)';
+    ctx.fillRect(0, 0,    W, mid-limY);
+    ctx.fillRect(0, mid+limY, W, H-(mid+limY));
 
-  // limit lines
-  ctx.strokeStyle='rgba(200,60,60,0.4)'; ctx.lineWidth=1;
-  ctx.setLineDash([4,4]);
-  ctx.beginPath(); ctx.moveTo(0,mid-limY); ctx.lineTo(W,mid-limY); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(0,mid+limY); ctx.lineTo(W,mid+limY); ctx.stroke();
-  ctx.setLineDash([]);
+    // limit lines
+    ctx.strokeStyle='rgba(200,60,60,0.4)'; ctx.lineWidth=1;
+    ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(0,mid-limY); ctx.lineTo(W,mid-limY); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0,mid+limY); ctx.lineTo(W,mid+limY); ctx.stroke();
+    ctx.setLineDash([]);
+  }
 
   // grid
   ctx.strokeStyle='#0d0d1c'; ctx.lineWidth=1;
@@ -431,30 +438,31 @@ function drawSine(W, H, dt) {
   if (!freerun) {
     ctx.fillStyle='rgba(124,92,252,0.06)';
     ctx.beginPath();
+    const envLim = limitActive ? lim : MAX_DEG;
     for(let px=0;px<=W;px++){
-      const ev=envVal(t+px/W*WINDOW)*lim*scale;
+      const ev=envVal(t+px/W*WINDOW)*envLim*scale;
       px===0 ? ctx.moveTo(px,mid-ev) : ctx.lineTo(px,mid-ev);
     }
     for(let px=W;px>=0;px--){
-      const ev=envVal(t+px/W*WINDOW)*lim*scale;
+      const ev=envVal(t+px/W*WINDOW)*envLim*scale;
       ctx.lineTo(px,mid+ev);
     }
     ctx.closePath(); ctx.fill();
   }
 
-  // osc 1 contribution (dim blue) — clipped to limit
+  // osc 1 contribution (dim blue) — clipped to limit if limitActive
   waveLine(W,mid,scale,lim,t,tx=>{
     const A=+ge('s1a').value,f=+ge('s1f').value,p=+ge('s1p').value*Math.PI/180;
     return A*Math.sin(TAU*f*tx+p)*envVal(tx);
   },'rgba(92,124,252,0.35)',1.5);
 
-  // osc 2 contribution (dim pink) — clipped to limit
+  // osc 2 contribution (dim pink) — clipped to limit if limitActive
   waveLine(W,mid,scale,lim,t,tx=>{
     const A=+ge('s2a').value,f=+ge('s2f').value,p=+ge('s2p').value*Math.PI/180;
     return A*Math.sin(TAU*f*tx+p)*envVal(tx);
   },'rgba(252,92,156,0.35)',1.5);
 
-  // combined — clipped to limit (bright purple inside, red outside)
+  // combined — clipped to limit if limitActive (bright purple inside, red outside)
   waveLine(W,mid,scale,lim,t,tx=>sineVal(tx)*envVal(tx),'#9c7cff',2);
 
   // time cursor
@@ -465,10 +473,11 @@ function drawSine(W, H, dt) {
 
   // current dot + value
   const cur = sineVal(t)*envVal(t);
-  const clampedCur = Math.max(-lim, Math.min(lim, cur));
+  const clampedCur = limitActive ? Math.max(-lim, Math.min(lim, cur)) : cur;
   const cy = mid - clampedCur*scale;
   // dot: orange if within limit, red if clamped
-  ctx.fillStyle = (Math.abs(cur) > lim) ? '#fc4c4c' : '#fc9c4c';
+  const isClamped = limitActive && Math.abs(cur) > lim;
+  ctx.fillStyle = isClamped ? '#fc4c4c' : '#fc9c4c';
   ctx.beginPath(); ctx.arc(0,cy,4.5,0,TAU); ctx.fill();
 
   // y labels
@@ -486,7 +495,8 @@ function waveLine(W,mid,scale,lim,t0,fn,color,lw) {
   for(let px=0;px<=W;px++){
     const tx  = t0+px/W*WINDOW;
     const raw = fn(tx);
-    const y   = mid - Math.max(-lim,Math.min(lim,raw))*scale;
+    const clamped = limitActive ? Math.max(-lim,Math.min(lim,raw)) : raw;
+    const y   = mid - clamped*scale;
     px===0 ? ctx.moveTo(px,y) : ctx.lineTo(px,y);
   }
   ctx.stroke();
@@ -503,12 +513,12 @@ function drawChaos(W, H, dt) {
   const steps    = Math.max(1, Math.round(dt*simSpeed/SIM_DT));
   for(let i=0;i<steps;i++) chaosDP.step(SIM_DT);
 
-  const lim    = motorLimit();
+  const lim    = limitActive ? motorLimit() : MAX_DEG;
   const split  = W*0.56;
   const {th1,th2,w1,L1,L2} = chaosDP;
   const scale  = +ge('cscale').value;
   const rawDeg = th1*180/Math.PI*scale;
-  const motorDeg = Math.max(-lim, Math.min(lim, rawDeg));
+  const motorDeg = limitActive ? Math.max(-lim, Math.min(lim, rawDeg)) : rawDeg;
   const clamped  = Math.abs(rawDeg) > lim;
 
   // ── Left: pendulum animation ──────────────────────────────────────
@@ -518,44 +528,49 @@ function drawChaos(W, H, dt) {
   const x1 = cx+Math.sin(th1)*L1*pxm, y1 = cy+Math.cos(th1)*L1*pxm;
   const x2 = x1+Math.sin(th2)*L2*pxm, y2 = y1+Math.cos(th2)*L2*pxm;
 
-  // Motor travel fan — shows the ±lim arc the actual motor can reach
+  // Motor travel fan — shows the limit arc the motor can reach
   const fanR    = Math.min(split*0.82, H*0.72);
   const limRad  = lim*Math.PI/180;
   const fanTop  = -Math.PI/2; // "up" = pendulum hanging straight down = motor zero
 
-  // Safe zone (within limit) — subtle green tint
-  ctx.fillStyle = clamped ? 'rgba(200,40,40,0.07)' : 'rgba(40,180,80,0.06)';
+  // Safe zone (within limit) — subtle green tint when limit enforced, blue when not
+  const zoneColor = limitActive
+    ? (clamped ? 'rgba(200,40,40,0.07)' : 'rgba(40,180,80,0.06)')
+    : 'rgba(92,124,252,0.06)';
+  ctx.fillStyle = zoneColor;
   ctx.beginPath();
   ctx.moveTo(cx, cy);
   ctx.arc(cx, cy, fanR, fanTop - limRad, fanTop + limRad);
   ctx.closePath(); ctx.fill();
 
-  // Limit boundary lines
-  ctx.strokeStyle = clamped ? 'rgba(220,60,60,0.5)' : 'rgba(60,180,80,0.25)';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4,4]);
-  ctx.beginPath();
-  ctx.moveTo(cx,cy);
-  ctx.lineTo(cx + Math.sin(-limRad)*fanR, cy - Math.cos(limRad)*fanR);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx,cy);
-  ctx.lineTo(cx + Math.sin(limRad)*fanR, cy - Math.cos(limRad)*fanR);
-  ctx.stroke();
-  ctx.setLineDash([]);
+  // Limit boundary lines — only show if limitActive
+  if (limitActive) {
+    ctx.strokeStyle = clamped ? 'rgba(220,60,60,0.5)' : 'rgba(60,180,80,0.25)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4,4]);
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.lineTo(cx + Math.sin(-limRad)*fanR, cy - Math.cos(limRad)*fanR);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(cx,cy);
+    ctx.lineTo(cx + Math.sin(limRad)*fanR, cy - Math.cos(limRad)*fanR);
+    ctx.stroke();
+    ctx.setLineDash([]);
 
-  // Limit arc edge
-  ctx.strokeStyle = clamped ? 'rgba(220,60,60,0.4)' : 'rgba(60,180,80,0.2)';
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.arc(cx, cy, fanR, fanTop-limRad, fanTop+limRad);
-  ctx.stroke();
+    // Limit arc edge
+    ctx.strokeStyle = clamped ? 'rgba(220,60,60,0.4)' : 'rgba(60,180,80,0.2)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(cx, cy, fanR, fanTop-limRad, fanTop+limRad);
+    ctx.stroke();
+  }
 
   // Motor position line (what the motor actually does)
   const motorRad = motorDeg*Math.PI/180;
   const mxEnd = cx + Math.sin(motorRad)*fanR*0.9;
   const myEnd = cy - Math.cos(motorRad)*fanR*0.9;
-  ctx.strokeStyle = clamped ? '#fc4c4c' : '#7c5cfc';
+  ctx.strokeStyle = (limitActive && clamped) ? '#fc4c4c' : '#7c5cfc';
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(mxEnd,myEnd); ctx.stroke();
 
@@ -592,7 +607,7 @@ function drawChaos(W, H, dt) {
   ctx.beginPath(); ctx.arc(x2,y2,4,0,TAU); ctx.fill();
 
   // Motor position dot on arc edge
-  ctx.fillStyle = clamped ? '#fc4c4c' : '#9c7cff';
+  ctx.fillStyle = (limitActive && clamped) ? '#fc4c4c' : '#9c7cff';
   ctx.beginPath(); ctx.arc(mxEnd, myEnd, 4.5, 0, TAU); ctx.fill();
 
   // ── Right: phase portrait (th1 vs w1) ────────────────────────────
@@ -633,7 +648,9 @@ function drawChaos(W, H, dt) {
   ctx.fillStyle='#9c7cff';
   ctx.beginPath(); ctx.arc(cpx,cpy,3.5,0,TAU); ctx.fill();
 
-  updatePosBar(motorDeg, lim);
+  // updatePosBar should reflect the actual motor angle (clamped)
+  const actualMotorDeg = limitActive ? Math.max(-motorLimit(), Math.min(motorLimit(), motorDeg)) : motorDeg;
+  updatePosBar(actualMotorDeg, motorLimit());
 }
 
 // ── Position bar ───────────────────────────────────────────────────────────
@@ -679,10 +696,31 @@ function bindSliders() {
       const isIC = ['cth1','cth2','cw1'].includes(id);
       if(isIC && ge('tog-reset').classList.contains('on')) resetChaos();
       if(!isIC && id.startsWith('c') && chaosDP) chaosDP.damping=+ge('cdamp').value;
+
+      // Update osc amplitude limits when motor limit changes (respect limitActive state)
+      if(id==='mlimit') {
+        const maxAmp = limitActive ? +el.value : 105;
+        ge('s1a').max = maxAmp;
+        ge('s2a').max = maxAmp;
+        // Cap values if they exceed the new limit
+        if(+ge('s1a').value > maxAmp) {
+          ge('s1a').value = maxAmp;
+          ge('s1a-v').textContent = maxAmp + '°';
+        }
+        if(+ge('s2a').value > maxAmp) {
+          ge('s2a').value = maxAmp;
+          ge('s2a-v').textContent = maxAmp + '°';
+        }
+      }
       scheduleUpdate();
     });
   });
   ge('tog-reset').addEventListener('click', ()=>ge('tog-reset').classList.toggle('on'));
+
+  // Initial: cap osc amplitudes to motor limit (or 105 if not limited)
+  const initialMaxAmp = limitActive ? motorLimit() : 105;
+  ge('s1a').max = initialMaxAmp;
+  ge('s2a').max = initialMaxAmp;
 }
 
 function toggleFree() {
@@ -694,11 +732,29 @@ function toggleFree() {
   scheduleUpdate();
 }
 
+function updateLimitState() {
+  limitActive = ge('tog-limit').classList.contains('on');
+  const lim = motorLimit();
+  const maxAmp = limitActive ? lim : 105;
+  ge('s1a').max = maxAmp;
+  ge('s2a').max = maxAmp;
+  // Clamp current values if needed
+  if(+ge('s1a').value > maxAmp) {
+    ge('s1a').value = maxAmp;
+    ge('s1a-v').textContent = maxAmp + '°';
+  }
+  if(+ge('s2a').value > maxAmp) {
+    ge('s2a').value = maxAmp;
+    ge('s2a-v').textContent = maxAmp + '°';
+  }
+  scheduleUpdate();
+}
+
 // ── API ────────────────────────────────────────────────────────────────────
 function motorLimit() { return +ge('mlimit').value; }
 
 function buildParams() {
-  const limit = motorLimit();
+  const limit = limitActive ? motorLimit() : 105;
   if (mode === 'sine') {
     return {
       mode:'sine',
