@@ -64,6 +64,24 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
 .btn:active{opacity:.5;transform:scale(.97)}
 .btn.run{border-color:#2c6c4c;background:#051009;color:#3ccc7c}
 .btn.stop{border-color:#6c2c2c;background:#100505;color:#ec6c6c}
+
+.preset-list{display:flex;flex-direction:column;gap:6px}
+.preset-item{display:flex;gap:6px;padding:8px;background:#04040a;border:1px solid #1c1c30;
+  border-radius:5px;align-items:center;font-size:10px}
+.preset-name{flex:1;color:#9c7cff}
+.preset-time{color:#4a4a6a;font-size:9px;min-width:80px}
+.preset-btn{padding:4px 8px;background:#181828;border:1px solid #2a2a42;border-radius:3px;
+  color:#c0c0e0;cursor:pointer;font-size:9px;flex-shrink:0}
+.preset-btn:hover{background:#2a2a42}
+
+.timeline-item{display:grid;grid-template-columns:80px 1fr 50px 50px;gap:6px;padding:8px;
+  background:#04040a;border:1px solid #1c1c30;border-radius:5px;align-items:center;font-size:10px}
+.timeline-preset{color:#9c7cff;text-overflow:ellipsis;overflow:hidden}
+.timeline-duration{padding:4px 8px;background:#181828;border:1px solid #2a2a42;border-radius:3px;
+  color:#c0c0e0;text-align:center;width:50px;font-size:9px}
+.timeline-del{padding:4px 8px;background:#6c2c2c;border:1px solid #8c4c4c;border-radius:3px;
+  color:#ec6c6c;cursor:pointer;font-size:9px}
+.timeline-del:hover{background:#8c4c4c}
 </style>
 </head>
 <body>
@@ -78,6 +96,8 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
 <div class="tabs">
   <div class="tab active" id="tab-sine" onclick="switchTab('sine')">Sine</div>
   <div class="tab" id="tab-chaos" onclick="switchTab('chaos')">Chaos</div>
+  <div class="tab" id="tab-presets" onclick="switchTab('presets')">Presets</div>
+  <div class="tab" id="tab-timeline" onclick="switchTab('timeline')">Timeline</div>
 </div>
 
 <div class="scroll">
@@ -225,6 +245,52 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
 
   </div><!-- /panel-chaos -->
 
+  <!-- ── PRESETS PANEL ──────────────────────────────────────────────── -->
+  <div id="panel-presets" style="display:none">
+    <div class="card">
+      <span class="card-label">Current Presets</span>
+      <div id="presets-list" class="preset-list"></div>
+    </div>
+    <div class="card">
+      <span class="card-label">Save Current State</span>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="preset-name-input" placeholder="Preset name..."
+          style="flex:1;padding:8px;background:#04040a;border:1px solid #181828;border-radius:4px;
+          color:#c0c0e0;font-family:monospace;font-size:10px">
+        <div class="btn" onclick="savePreset()" style="flex:0;padding:8px 14px;width:auto">Save</div>
+      </div>
+    </div>
+  </div><!-- /panel-presets -->
+
+  <!-- ── TIMELINE PANEL ─────────────────────────────────────────────── -->
+  <div id="panel-timeline" style="display:none">
+    <div class="card">
+      <span class="card-label">Timeline Sequence</span>
+      <div id="timeline-list" class="preset-list"></div>
+    </div>
+    <div class="card">
+      <span class="card-label">Add Preset to Timeline</span>
+      <div style="display:grid;grid-template-columns:1fr 70px;gap:6px">
+        <select id="timeline-preset-select" style="padding:8px;background:#04040a;border:1px solid #181828;
+          border-radius:4px;color:#c0c0e0;font-family:monospace;font-size:10px">
+          <option value="">— select preset —</option>
+        </select>
+        <input type="number" id="timeline-duration" min="0.5" max="60" step="0.5" value="5"
+          style="padding:8px;background:#04040a;border:1px solid #181828;border-radius:4px;
+          color:#c0c0e0;font-family:monospace;font-size:10px;text-align:center"
+          title="transition duration (seconds)">
+      </div>
+      <div class="btn" onclick="addToTimeline()" style="margin-top:6px;padding:8px">+ Add to Timeline</div>
+    </div>
+    <div class="card">
+      <span class="card-label">Timeline Info</span>
+      <div style="font-size:9px;color:#4a4a6a;line-height:1.6">
+        <div>Total duration: <span id="timeline-total-duration">0</span>s</div>
+        <div style="margin-top:4px">Run will interpolate chaos params smoothly between presets</div>
+      </div>
+    </div>
+  </div><!-- /panel-timeline -->
+
   <!-- ── MOTOR ─────────────────────────────────────────────────────── -->
   <div class="card">
     <span class="card-label">Motor</span>
@@ -281,6 +347,123 @@ let bob2Trail = [];        // [{x,y}] canvas coords for pendulum trail
 let phaseTrail = [];       // [{th, w}] for phase portrait
 let lastRaf = 0;
 let updateTimer = null;
+let activeTimeline = false; // running timeline sequence
+
+// ── Presets & Timeline ──────────────────────────────────────────────────────
+let presets = {};          // {name: {cL1, cL2, cm1, cm2, cth1, cth2, cw1, cdamp}}
+let timeline = [];         // [{presetName, duration}]
+const PRESETS_KEY = 'whip_presets';
+const TIMELINE_KEY = 'whip_timeline';
+
+function loadPresetsFromStorage() {
+  try {
+    presets = JSON.parse(localStorage.getItem(PRESETS_KEY) || '{}');
+    timeline = JSON.parse(localStorage.getItem(TIMELINE_KEY) || '[]');
+  } catch {}
+  updatePresetsUI();
+  updateTimelineUI();
+}
+
+function savePreset() {
+  const name = ge('preset-name-input').value.trim();
+  if (!name) return;
+  presets[name] = {
+    cL1: +ge('cL1').value,
+    cL2: +ge('cL2').value,
+    cm1: +ge('cm1').value,
+    cm2: +ge('cm2').value,
+    cth1: +ge('cth1').value,
+    cth2: +ge('cth2').value,
+    cw1: +ge('cw1').value,
+    cdamp: +ge('cdamp').value,
+    timestamp: new Date().toLocaleString()
+  };
+  localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  ge('preset-name-input').value = '';
+  updatePresetsUI();
+  updateTimelineSelect();
+}
+
+function loadPreset(name) {
+  const p = presets[name];
+  if (!p) return;
+  ge('cL1').value = p.cL1;
+  ge('cL2').value = p.cL2;
+  ge('cm1').value = p.cm1;
+  ge('cm2').value = p.cm2;
+  ge('cth1').value = p.cth1;
+  ge('cth2').value = p.cth2;
+  ge('cw1').value = p.cw1;
+  ge('cdamp').value = p.cdamp;
+
+  // Update display values
+  ['cL1','cL2','cm1','cm2','cth1','cth2','cw1','cdamp'].forEach(id=>{
+    const fmt = SLIDERS.find(s=>s[0]===id)?.[1];
+    if (fmt) ge(id+'-v').textContent = fmt(ge(id).value);
+  });
+
+  if (ge('tog-reset').classList.contains('on')) resetChaos();
+}
+
+function deletePreset(name) {
+  delete presets[name];
+  localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  updatePresetsUI();
+  updateTimelineSelect();
+}
+
+function updatePresetsUI() {
+  const list = ge('presets-list');
+  const names = Object.keys(presets).sort();
+  list.innerHTML = names.map(name => `
+    <div class="preset-item">
+      <span class="preset-name">${name}</span>
+      <span class="preset-time">${presets[name].timestamp || ''}</span>
+      <div class="preset-btn" onclick="loadPreset('${name}')">Load</div>
+      <div class="preset-btn" style="background:#6c2c2c;border-color:#8c4c4c;color:#ec6c6c"
+        onclick="deletePreset('${name}')">Delete</div>
+    </div>
+  `).join('');
+  if (names.length === 0) list.innerHTML = '<div style="color:#4a4a6a;font-size:9px;padding:8px">No presets saved</div>';
+}
+
+function updateTimelineSelect() {
+  const sel = ge('timeline-preset-select');
+  const names = Object.keys(presets).sort();
+  sel.innerHTML = '<option value="">— select preset —</option>' +
+    names.map(n => `<option value="${n}">${n}</option>`).join('');
+}
+
+function addToTimeline() {
+  const name = ge('timeline-preset-select').value;
+  if (!name) return;
+  const dur = +ge('timeline-duration').value;
+  timeline.push({presetName: name, duration: dur});
+  localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
+  updateTimelineUI();
+}
+
+function removeFromTimeline(idx) {
+  timeline.splice(idx, 1);
+  localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
+  updateTimelineUI();
+}
+
+function updateTimelineUI() {
+  const list = ge('timeline-list');
+  const dur = timeline.reduce((s,t)=>s+t.duration, 0);
+  ge('timeline-total-duration').textContent = dur.toFixed(1);
+
+  list.innerHTML = timeline.map((t,i) => `
+    <div class="timeline-item">
+      <span class="timeline-preset">${t.presetName}</span>
+      <span style="font-size:9px;color:#4a4a6a">→</span>
+      <span class="timeline-duration">${t.duration}s</span>
+      <div class="timeline-del" onclick="removeFromTimeline(${i})">Delete</div>
+    </div>
+  `).join('');
+  if (timeline.length === 0) list.innerHTML = '<div style="color:#4a4a6a;font-size:9px;padding:8px">No timeline items yet</div>';
+}
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
 let ws = null;
@@ -312,9 +495,17 @@ function switchTab(t) {
   mode = t;
   ge('tab-sine').classList.toggle('active', t === 'sine');
   ge('tab-chaos').classList.toggle('active', t === 'chaos');
+  ge('tab-presets').classList.toggle('active', t === 'presets');
+  ge('tab-timeline').classList.toggle('active', t === 'timeline');
   ge('panel-sine').style.display  = t === 'sine'  ? '' : 'none';
   ge('panel-chaos').style.display = t === 'chaos' ? '' : 'none';
+  ge('panel-presets').style.display = t === 'presets' ? '' : 'none';
+  ge('panel-timeline').style.display = t === 'timeline' ? '' : 'none';
   if (t === 'chaos' && !chaosDP) resetChaos();
+  if (t === 'presets' || t === 'timeline') {
+    if (t === 'presets') updatePresetsUI();
+    if (t === 'timeline') updateTimelineUI();
+  }
   bob2Trail = []; phaseTrail = [];
 }
 
@@ -662,7 +853,41 @@ function updatePosBar(deg, lim) {
   ge('pos-deg').textContent  = deg.toFixed(1)+'°';
 }
 
-// ── Slider binding ─────────────────────────────────────────────────────────
+// ── Interpolation ──────────────────────────────────────────────────────────
+function interpolate(a, b, t) {
+  return a + (b - a) * Math.max(0, Math.min(1, t));
+}
+
+function getTimelineParams(elapsedS) {
+  if (timeline.length === 0) return null;
+
+  let acc = 0;
+  for (let i = 0; i < timeline.length; i++) {
+    const item = timeline[i];
+    const nextAcc = acc + item.duration;
+    if (elapsedS < nextAcc) {
+      // Interpolate between current and next preset
+      const t = (elapsedS - acc) / item.duration;
+      const current = presets[item.presetName];
+      const next = i+1 < timeline.length ? presets[timeline[i+1].presetName] : current;
+      if (!current || !next) return null;
+      return {
+        cL1: interpolate(current.cL1, next.cL1, t),
+        cL2: interpolate(current.cL2, next.cL2, t),
+        cm1: interpolate(current.cm1, next.cm1, t),
+        cm2: interpolate(current.cm2, next.cm2, t),
+        cth1: interpolate(current.cth1, next.cth1, t),
+        cth2: interpolate(current.cth2, next.cth2, t),
+        cw1: interpolate(current.cw1, next.cw1, t),
+        cdamp: interpolate(current.cdamp, next.cdamp, t),
+      };
+    }
+    acc = nextAcc;
+  }
+  // Timeline complete — use last preset
+  const last = presets[timeline[timeline.length-1].presetName];
+  return last || null;
+}
 const SLIDERS = [
   ['s1a',  v=>v+'°'],
   ['s1f',  v=>(+v).toFixed(2)+' Hz'],
@@ -766,8 +991,9 @@ function buildParams() {
       limit, speed:+ge('mspd').value,
     };
   }
-  return {
-    mode:'chaos',
+
+  // Chaos mode (with optional timeline interpolation)
+  let params = {
     L1:+ge('cL1').value,  L2:+ge('cL2').value,
     m1:+ge('cm1').value,  m2:+ge('cm2').value,
     th1:+ge('cth1').value, th2:+ge('cth2').value,
@@ -775,13 +1001,32 @@ function buildParams() {
     damping:+ge('cdamp').value,
     scale:+ge('cscale').value,
     simSpeed:+ge('csim').value,
+  };
+
+  // If timeline is active, interpolate from timeline
+  if (activeTimeline && timeline.length > 0 && runT0 !== null) {
+    const elapsedS = (Date.now() - runT0) / 1000;
+    const tlParams = getTimelineParams(elapsedS);
+    if (tlParams) {
+      params = {...params, ...tlParams};
+    }
+  }
+
+  return {
+    mode:'chaos',
+    ...params,
     limit, speed:+ge('mspd').value,
   };
 }
 
 async function doRun() {
+  // If on timeline tab and timeline has items, run timeline
+  activeTimeline = (mode === 'timeline' && timeline.length > 0);
+
   runT0 = Date.now();
-  if (mode==='chaos') resetChaos();
+  if (mode==='chaos' || activeTimeline) {
+    resetChaos();
+  }
   try {
     await fetch(`${BASE}/api/osc/start`,{
       method:'POST', headers:{'Content-Type':'application/json'},
@@ -819,6 +1064,7 @@ function setDot(id,state){
 // ── Init ───────────────────────────────────────────────────────────────────
 window.addEventListener('resize', () => { _canvasW = 0; bob2Trail = []; phaseTrail = []; });
 bindSliders();
+loadPresetsFromStorage();
 connectWS();
 requestAnimationFrame(rafLoop);
 </script>
