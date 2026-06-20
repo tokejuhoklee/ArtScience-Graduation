@@ -408,9 +408,12 @@ class DoublePendulum:
 
 # ── Oscillator engine ─────────────────────────────────────────────────────────
 class OscillatorEngine:
-    RATE    = 15        # Hz — move commands sent to Pico
-    SIM_DT  = 0.003    # chaos ODE integration step (s)
-    MAX_DEG = 105
+    RATE      = 25       # Hz — move commands sent to Pico
+    SIM_DT    = 0.003    # chaos ODE integration step (s)
+    MAX_DEG   = 105
+    MIN_SPS   = 50       # Pico's minSpeed floor
+    MAX_SPS   = 3000     # Pico's maxSpeed ceiling
+    SPS_QUANT = 25       # round commanded speed to this grid (gates resends)
 
     def __init__(self):
         self.running      = False
@@ -440,6 +443,7 @@ class OscillatorEngine:
         if self._task and not self._task.done():
             self._task.cancel()
         serial_mgr.flush_and_stop()
+        serial_mgr.send("quietoff")   # restore verbose logging for manual control
         self.running = False
 
     async def _run(self, initial_params, gen):
@@ -449,7 +453,7 @@ class OscillatorEngine:
         # Motor setup: set hard travel limit, disable ramps for smooth tracking
         limit = int(initial_params.get('limit', 90))
         limit = max(10, min(105, limit))
-        for cmd in ("on", f"angle {limit}", "softstartoff", "brakeoff"):
+        for cmd in ("on", f"angle {limit}", "softstartoff", "brakeoff", "quieton"):
             serial_mgr.send(cmd)
             await asyncio.sleep(0.04)
 
@@ -467,20 +471,20 @@ class OscillatorEngine:
         if init_mode == 'chaos':
             dp = _make_dp(self.params)
 
-        t0        = time.time()
-        next_tick = t0
+        t0         = time.time()
+        next_tick  = t0
         last_speed = -1
+        last_steps = None   # previous target sent — for velocity matching
+        phase1 = phase2 = 0.0   # accumulated sine phase (continuous across freq changes)
+        prev_t = 0.0
 
         try:
             while self._gen == gen:
                 now = time.time()
                 t   = now - t0
+                dt_real = max(0.0, t - prev_t)
+                prev_t  = t
                 p   = self.params
-
-                speed = int(p.get('speed', 2000))
-                if speed != last_speed:
-                    serial_mgr.send(f"speed {speed}")
-                    last_speed = speed
 
                 # Mode can change tick-to-tick (timeline sequencing sine↔chaos)
                 mode = p.get('mode', init_mode)
@@ -496,12 +500,33 @@ class OscillatorEngine:
                         dp.step(self.SIM_DT)
                     scale = p.get('scale', 0.58)
                     angle = max(-lim, min(lim, math.degrees(dp.th1) * scale))
-                else:  # sine
-                    angle = max(-lim, min(lim, self._sine(t, p)))
+                else:  # sine — accumulate phase so freq changes don't jump position
+                    o1 = p.get('osc1', {}); o2 = p.get('osc2', {})
+                    phase1 += 2*math.pi * o1.get('freq', 0.4) * dt_real
+                    phase2 += 2*math.pi * o2.get('freq', 1.1) * dt_real
+                    angle = max(-lim, min(lim, self._sine(phase1, phase2, t, p)))
 
                 self.current_angle = angle
                 steps = int(angle * GEAR_RATIO / 360.0 * PULSES_PER_REV)
+
+                # Velocity matching: pick the step rate that covers this segment
+                # in exactly one tick, so the motor glides instead of dashing and
+                # idling. The user's speed slider is the upper bound.
+                cap = max(self.MIN_SPS, min(self.MAX_SPS, int(p.get('speed', 2000))))
+                if last_steps is None:
+                    target_sps = cap        # first move: go at full cap to seed
+                else:
+                    required   = abs(steps - last_steps) / DT
+                    target_sps = max(self.MIN_SPS, min(cap, required))
+                # quantise so steady motion doesn't resend speed every tick
+                target_sps = int(round(target_sps / self.SPS_QUANT)) * self.SPS_QUANT
+                target_sps = max(self.MIN_SPS, min(cap, target_sps))
+
+                if target_sps != last_speed:
+                    serial_mgr.send(f"speed {target_sps}")
+                    last_speed = target_sps
                 serial_mgr.send(f"move {steps}")
+                last_steps = steps
 
                 next_tick += DT
                 await asyncio.sleep(max(0.0, next_tick - time.time()))
@@ -509,12 +534,12 @@ class OscillatorEngine:
             self.running = False
 
     @staticmethod
-    def _sine(t, p):
+    def _sine(phase1, phase2, t, p):
         o1  = p.get('osc1', {})
         o2  = p.get('osc2', {})
-        A1  = o1.get('amp',80);  f1=o1.get('freq',0.4); ph1=math.radians(o1.get('phase',0))
-        A2  = o2.get('amp',25);  f2=o2.get('freq',1.1); ph2=math.radians(o2.get('phase',90))
-        raw = A1*math.sin(2*math.pi*f1*t+ph1) + A2*math.sin(2*math.pi*f2*t+ph2)
+        A1  = o1.get('amp',80);  ph1=math.radians(o1.get('phase',0))
+        A2  = o2.get('amp',25);  ph2=math.radians(o2.get('phase',90))
+        raw = A1*math.sin(phase1+ph1) + A2*math.sin(phase2+ph2)
 
         env = p.get('envelope')
         if env is None:

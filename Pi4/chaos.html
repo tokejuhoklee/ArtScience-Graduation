@@ -64,6 +64,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
 .btn:active{opacity:.5;transform:scale(.97)}
 .btn.run{border-color:#2c6c4c;background:#051009;color:#3ccc7c}
 .btn.stop{border-color:#6c2c2c;background:#100505;color:#ec6c6c}
+.btn.off{border-color:#6c5420;background:#100c02;color:#fcb84c}
 
 .preset-list{display:flex;flex-direction:column;gap:6px}
 .preset-item{display:flex;gap:6px;padding:8px;background:#04040a;border:1px solid #1c1c30;
@@ -314,9 +315,19 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
       hard travel cap — keep below physical stop clearance
     </div>
     <div class="prow">
-      <span class="plabel">Speed</span>
+      <span class="plabel">Max spd</span>
       <input type="range" id="mspd" min="200" max="3000" step="50" value="2000">
       <span class="pval" id="mspd-v">2000 sps</span>
+    </div>
+    <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px">
+      ceiling — actual rate auto-matches the motion each tick
+    </div>
+    <div class="tog-row" style="margin-top:2px">
+      <span>Limit motion to max speed</span>
+      <div class="tog on" id="tog-spdclamp" onclick="this.classList.toggle('on'); updateSpeedClamp()"></div>
+    </div>
+    <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px">
+      caps amplitude so the arm can keep up — off shows the unreachable ideal
     </div>
   </div>
 
@@ -333,6 +344,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
   <div class="btn-row">
     <div class="btn run" onclick="doRun()">▶ Run</div>
     <div class="btn stop" onclick="doStop()">⬛ Stop</div>
+    <div class="btn off" onclick="doOff()">⏻ Off</div>
   </div>
 </div>
 
@@ -342,6 +354,8 @@ const BASE   = `${location.protocol}//${location.hostname}:8080`;
 const WS_URL = `ws://${location.hostname}:8081`;
 const TAU    = Math.PI * 2;
 const MAX_DEG = 105;
+const PPR  = 400, GEAR = 5;                 // motor pulses/rev, gearbox reduction
+const DEG_PER_STEP = 360 / (PPR * GEAR);    // arm degrees per motor step (0.18°)
 
 // ── State ──────────────────────────────────────────────────────────────────
 let tab  = 'sine';         // visible tab: sine | chaos | presets | timeline
@@ -349,6 +363,9 @@ let mode = 'sine';         // engine mode: sine | chaos (only changes on sine/ch
 let running = false;
 let freerun = true;
 let limitActive = true;    // enforce travel limit toggle
+let speedClampActive = true; // clamp osc amplitude so demanded speed <= max sps
+let motorAngle = 0;        // slew-rate-limited preview of the motor's real position
+let oscPhase1 = 0, oscPhase2 = 0; // accumulated sine phase (continuous across freq changes)
 let runT0 = null;          // browser-side run start (ms)
 let chaosDP = null;
 let bob2Trail = [];        // [{x,y}] canvas coords for pendulum trail
@@ -550,11 +567,15 @@ function switchTab(t) {
 }
 
 // ── Sine math ──────────────────────────────────────────────────────────────
-function sineVal(t) {
-  const A1 = +ge('s1a').value, f1 = +ge('s1f').value, p1 = +ge('s1p').value * Math.PI/180;
-  const A2 = +ge('s2a').value, f2 = +ge('s2f').value, p2 = +ge('s2p').value * Math.PI/180;
-  return A1*Math.sin(TAU*f1*t+p1) + A2*Math.sin(TAU*f2*t+p2);
+// Phase is accumulated (see rafLoop) so changing frequency only alters the rate
+// going forward — it never jumps the current position. tau = seconds ahead of now.
+function oscWave(idx, tau) {
+  const A = +ge('s'+idx+'a').value, f = +ge('s'+idx+'f').value,
+        p = +ge('s'+idx+'p').value * Math.PI/180;
+  const base = idx === 1 ? oscPhase1 : oscPhase2;
+  return A * Math.sin(base + TAU*f*tau + p);
 }
+function sineWave(tau) { return oscWave(1, tau) + oscWave(2, tau); }
 
 function envVal(t) {
   if (freerun) return 1;
@@ -639,9 +660,15 @@ const WINDOW = 14; // seconds shown ahead
 function drawSine(W, H, dt) {
   const t   = runT0 !== null ? (Date.now()-runT0)/1000 : 0;
   const lim = motorLimit();
-  const cur = sineVal(t)*envVal(t);
+  if (runT0 !== null) {           // advance accumulated phase only while running
+    oscPhase1 += TAU * (+ge('s1f').value) * dt;
+    oscPhase2 += TAU * (+ge('s2f').value) * dt;
+  }
+  const cur = sineWave(0)*envVal(t);
   const clampedCur = limitActive ? Math.max(-lim, Math.min(lim, cur)) : cur;
   const isClamped  = limitActive && Math.abs(cur) > lim;
+  const motorNow   = slewMotor(clampedCur, dt);          // speed-limited actual position
+  const lagging    = Math.abs(clampedCur - motorNow) > 1.5;
 
   const split = Math.round(W * 0.36);
   const waveW = W - split;
@@ -672,19 +699,26 @@ function drawSine(W, H, dt) {
     ctx.beginPath(); ctx.arc(cx,cy,fanR,-Math.PI/2-limRad,-Math.PI/2+limRad); ctx.stroke();
   }
 
-  const armRad = clampedCur * Math.PI / 180;
+  // faint target line = the ideal setpoint the motor is chasing
+  const tgtRad = clampedCur * Math.PI / 180;
+  ctx.strokeStyle = 'rgba(124,92,252,0.25)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(cx,cy);
+  ctx.lineTo(cx+Math.sin(tgtRad)*fanR*0.9, cy-Math.cos(tgtRad)*fanR*0.9); ctx.stroke();
+
+  // bright line = slew-limited actual motor position (lags when speed-capped)
+  const armRad = motorNow * Math.PI / 180;
   const axEnd  = cx + Math.sin(armRad)*fanR*0.9;
   const ayEnd  = cy - Math.cos(armRad)*fanR*0.9;
-  ctx.strokeStyle = isClamped ? '#fc4c4c' : '#7c5cfc';
+  ctx.strokeStyle = isClamped ? '#fc4c4c' : (lagging ? '#fcb84c' : '#7c5cfc');
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(axEnd,ayEnd); ctx.stroke();
   ctx.fillStyle = '#3a3a58';
   ctx.beginPath(); ctx.arc(cx,cy,4,0,TAU); ctx.fill();
-  ctx.fillStyle = isClamped ? '#fc4c4c' : '#9c7cff';
+  ctx.fillStyle = isClamped ? '#fc4c4c' : (lagging ? '#fcb84c' : '#9c7cff');
   ctx.beginPath(); ctx.arc(axEnd,ayEnd,4.5,0,TAU); ctx.fill();
 
   ctx.fillStyle = '#4a4a6a'; ctx.font = '9px monospace'; ctx.textAlign = 'center';
-  ctx.fillText(clampedCur.toFixed(1)+'°', cx, cy+fanR*0.95+13);
+  ctx.fillText(motorNow.toFixed(1)+'°', cx, cy+fanR*0.95+13);
 
   // Divider
   ctx.strokeStyle = '#141428'; ctx.lineWidth = 1;
@@ -727,24 +761,18 @@ function drawSine(W, H, dt) {
     ctx.closePath(); ctx.fill();
   }
 
-  waveLine(split,waveW,mid,scale,lim,t,tx=>{
-    const A=+ge('s1a').value,f=+ge('s1f').value,p=+ge('s1p').value*Math.PI/180;
-    return A*Math.sin(TAU*f*tx+p)*envVal(tx);
-  },'rgba(92,124,252,0.35)',1.5);
-  waveLine(split,waveW,mid,scale,lim,t,tx=>{
-    const A=+ge('s2a').value,f=+ge('s2f').value,p=+ge('s2p').value*Math.PI/180;
-    return A*Math.sin(TAU*f*tx+p)*envVal(tx);
-  },'rgba(252,92,156,0.35)',1.5);
-  waveLine(split,waveW,mid,scale,lim,t,tx=>sineVal(tx)*envVal(tx),'#9c7cff',2);
+  waveLine(split,waveW,mid,scale,lim, tau=>oscWave(1,tau)*envVal(t+tau), 'rgba(92,124,252,0.35)',1.5);
+  waveLine(split,waveW,mid,scale,lim, tau=>oscWave(2,tau)*envVal(t+tau), 'rgba(252,92,156,0.35)',1.5);
+  waveLine(split,waveW,mid,scale,lim, tau=>sineWave(tau)*envVal(t+tau), '#9c7cff',2);
 
   // time cursor at left edge of waveform
   ctx.strokeStyle='rgba(252,156,76,0.5)'; ctx.lineWidth=1; ctx.setLineDash([3,4]);
   ctx.beginPath(); ctx.moveTo(split,0); ctx.lineTo(split,H); ctx.stroke();
   ctx.setLineDash([]);
 
-  // current dot on waveform edge
-  const cy2 = mid - clampedCur*scale;
-  ctx.fillStyle = isClamped ? '#fc4c4c' : '#fc9c4c';
+  // motor dot on waveform edge (slew-limited) — sits off the ideal curve when lagging
+  const cy2 = mid - motorNow*scale;
+  ctx.fillStyle = isClamped ? '#fc4c4c' : (lagging ? '#fcb84c' : '#fc9c4c');
   ctx.beginPath(); ctx.arc(split,cy2,4.5,0,TAU); ctx.fill();
 
   ctx.fillStyle='#2a2a42'; ctx.font='9px monospace'; ctx.textAlign='left';
@@ -752,14 +780,14 @@ function drawSine(W, H, dt) {
     ctx.fillText(a+'°', split+3, mid-a*scale-2);
   });
 
-  updatePosBar(runT0 === null ? 0 : clampedCur, lim);
+  updatePosBar(motorNow, lim);
 }
 
-function waveLine(xOff,W,mid,scale,lim,t0,fn,color,lw) {
+function waveLine(xOff,W,mid,scale,lim,fn,color,lw) {
   ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.beginPath();
   for(let px=0;px<=W;px++){
-    const tx  = t0+px/W*WINDOW;
-    const raw = fn(tx);
+    const tau = px/W*WINDOW;          // seconds ahead of now
+    const raw = fn(tau);
     const clamped = limitActive ? Math.max(-lim,Math.min(lim,raw)) : raw;
     const y   = mid - clamped*scale;
     const x   = xOff + px;
@@ -797,6 +825,8 @@ function drawChaos(W, H, dt) {
   const rawDeg = th1*180/Math.PI*scale;
   const motorDeg = limitActive ? Math.max(-lim, Math.min(lim, rawDeg)) : rawDeg;
   const clamped  = Math.abs(rawDeg) > lim;
+  const motorNow = slewMotor(motorDeg, dt);   // speed-limited actual position
+  const lagging  = Math.abs(motorDeg - motorNow) > 1.5;
 
   // ── Left: pendulum animation ──────────────────────────────────────
   const cx = split*0.5, cy = H*0.30;
@@ -843,11 +873,17 @@ function drawChaos(W, H, dt) {
     ctx.stroke();
   }
 
-  // Motor position line (what the motor actually does)
-  const motorRad = motorDeg*Math.PI/180;
+  // Faint target line = ideal θ₁·scale the motor is chasing
+  const tgtRad = motorDeg*Math.PI/180;
+  ctx.strokeStyle = 'rgba(124,92,252,0.22)'; ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.moveTo(cx,cy);
+  ctx.lineTo(cx+Math.sin(tgtRad)*fanR*0.9, cy-Math.cos(tgtRad)*fanR*0.9); ctx.stroke();
+
+  // Motor position line (slew-limited actual — lags the sim when speed-capped)
+  const motorRad = motorNow*Math.PI/180;
   const mxEnd = cx + Math.sin(motorRad)*fanR*0.9;
   const myEnd = cy - Math.cos(motorRad)*fanR*0.9;
-  ctx.strokeStyle = (limitActive && clamped) ? '#fc4c4c' : '#7c5cfc';
+  ctx.strokeStyle = (limitActive && clamped) ? '#fc4c4c' : (lagging ? '#fcb84c' : '#7c5cfc');
   ctx.lineWidth = 2;
   ctx.beginPath(); ctx.moveTo(cx,cy); ctx.lineTo(mxEnd,myEnd); ctx.stroke();
 
@@ -883,8 +919,8 @@ function drawChaos(W, H, dt) {
   ctx.fillStyle='rgba(252,156,76,0.5)';
   ctx.beginPath(); ctx.arc(x2,y2,4,0,TAU); ctx.fill();
 
-  // Motor position dot on arc edge
-  ctx.fillStyle = (limitActive && clamped) ? '#fc4c4c' : '#9c7cff';
+  // Motor position dot on arc edge (slew-limited)
+  ctx.fillStyle = (limitActive && clamped) ? '#fc4c4c' : (lagging ? '#fcb84c' : '#9c7cff');
   ctx.beginPath(); ctx.arc(mxEnd, myEnd, 4.5, 0, TAU); ctx.fill();
 
   // ── Right: phase portrait (th1 vs w1) ────────────────────────────
@@ -925,9 +961,8 @@ function drawChaos(W, H, dt) {
   ctx.fillStyle='#9c7cff';
   ctx.beginPath(); ctx.arc(cpx,cpy,3.5,0,TAU); ctx.fill();
 
-  // updatePosBar should reflect the actual motor angle (clamped)
-  const actualMotorDeg = limitActive ? Math.max(-motorLimit(), Math.min(motorLimit(), motorDeg)) : motorDeg;
-  updatePosBar(actualMotorDeg, motorLimit());
+  // position bar reflects the slew-limited actual motor angle
+  updatePosBar(motorNow, motorLimit());
 }
 
 // ── Position bar ───────────────────────────────────────────────────────────
@@ -1011,30 +1046,14 @@ function bindSliders() {
       if(isIC && ge('tog-reset').classList.contains('on')) resetChaos();
       if(!isIC && id.startsWith('c') && chaosDP) chaosDP.damping=+ge('cdamp').value;
 
-      // Update osc amplitude limits when motor limit changes (respect limitActive state)
-      if(id==='mlimit') {
-        const maxAmp = limitActive ? +el.value : 105;
-        ge('s1a').max = maxAmp;
-        ge('s2a').max = maxAmp;
-        // Cap values if they exceed the new limit
-        if(+ge('s1a').value > maxAmp) {
-          ge('s1a').value = maxAmp;
-          ge('s1a-v').textContent = maxAmp + '°';
-        }
-        if(+ge('s2a').value > maxAmp) {
-          ge('s2a').value = maxAmp;
-          ge('s2a-v').textContent = maxAmp + '°';
-        }
-      }
+      // Amplitude ceilings depend on motor limit, max speed, and osc frequency
+      if(id==='mlimit' || id==='mspd' || id==='s1f' || id==='s2f') refreshAmpLimits();
       scheduleUpdate();
     });
   });
   ge('tog-reset').addEventListener('click', ()=>ge('tog-reset').classList.toggle('on'));
 
-  // Initial: cap osc amplitudes to motor limit (or 105 if not limited)
-  const initialMaxAmp = limitActive ? motorLimit() : 105;
-  ge('s1a').max = initialMaxAmp;
-  ge('s2a').max = initialMaxAmp;
+  refreshAmpLimits();   // initial amplitude ceilings
 }
 
 function toggleFree() {
@@ -1048,24 +1067,49 @@ function toggleFree() {
 
 function updateLimitState() {
   limitActive = ge('tog-limit').classList.contains('on');
-  const lim = motorLimit();
-  const maxAmp = limitActive ? lim : 105;
-  ge('s1a').max = maxAmp;
-  ge('s2a').max = maxAmp;
-  // Clamp current values if needed
-  if(+ge('s1a').value > maxAmp) {
-    ge('s1a').value = maxAmp;
-    ge('s1a-v').textContent = maxAmp + '°';
-  }
-  if(+ge('s2a').value > maxAmp) {
-    ge('s2a').value = maxAmp;
-    ge('s2a-v').textContent = maxAmp + '°';
-  }
+  refreshAmpLimits();
   scheduleUpdate();
 }
 
 // ── API ────────────────────────────────────────────────────────────────────
 function motorLimit() { return +ge('mlimit').value; }
+function maxSps()     { return +ge('mspd').value; }
+function armVelCap()  { return maxSps() * DEG_PER_STEP; }   // arm deg/s ceiling
+
+// Slew the previewed motor position toward target at the speed cap, so the
+// canvas shows what the motor actually does (mirrors server velocity matching).
+function slewMotor(target, dt) {
+  const maxStep = armVelCap() * dt;
+  motorAngle += Math.max(-maxStep, Math.min(maxStep, target - motorAngle));
+  return motorAngle;
+}
+
+// Largest oscillator amplitude whose peak speed (A·2πf) stays under the cap.
+function speedAmpMax(freq) {
+  return armVelCap() / (TAU * Math.max(freq, 0.001));
+}
+
+// Effective amplitude ceiling = travel limit, and (if enabled) speed feasibility.
+function effectiveAmpMax(freqId) {
+  let m = limitActive ? motorLimit() : 105;
+  if (speedClampActive) m = Math.min(m, speedAmpMax(+ge(freqId).value));
+  return Math.max(1, Math.round(m));
+}
+
+// Apply amplitude ceilings to both oscillator sliders, clamping current values.
+function refreshAmpLimits() {
+  [['s1a','s1f'], ['s2a','s2f']].forEach(([aId, fId]) => {
+    const m = effectiveAmpMax(fId);
+    ge(aId).max = m;
+    if (+ge(aId).value > m) { ge(aId).value = m; ge(aId+'-v').textContent = m + '°'; }
+  });
+}
+
+function updateSpeedClamp() {
+  speedClampActive = ge('tog-spdclamp').classList.contains('on');
+  refreshAmpLimits();
+  scheduleUpdate();
+}
 
 function buildParams() {
   const limit = limitActive ? motorLimit() : 105;
@@ -1125,6 +1169,7 @@ async function doRun() {
   activeTimeline = (tab === 'timeline' && timeline.length > 0);
 
   runT0 = Date.now();
+  oscPhase1 = oscPhase2 = 0;   // clean centered start, matching the server
   if (mode==='chaos' || activeTimeline) {
     resetChaos();
   }
@@ -1155,6 +1200,18 @@ async function doStop() {
   clearInterval(tlTimer);
   try {
     await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
+  } catch {}
+}
+
+// Off: stop the oscillator AND de-energise the motor (sends `off` to the Pico).
+// Stop only halts motion and leaves holding torque; Off cuts power.
+async function doOff() {
+  runT0=null;
+  activeTimeline=false;
+  clearInterval(tlTimer);
+  try {
+    await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
+    await fetch(`${BASE}/api/cmd?c=off`,{signal:AbortSignal.timeout(3000)});
   } catch {}
 }
 
