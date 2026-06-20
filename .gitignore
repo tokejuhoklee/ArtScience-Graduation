@@ -21,3 +21,6 @@ whip-ui/dist/
 __pycache__/
 *.pyc
 Pi4/venv/
+
+# Runtime data (lives on the Pi4)
+Pi4/chaos_presets.json

@@ -47,6 +47,7 @@ BAUD            = 115200
 SEQUENCES_DIR   = Path(__file__).parent / "sequences"
 STATIC_DIR      = Path(__file__).parent / "static"
 MOBILE_HTML     = Path(__file__).parent / "mobile.html"
+CHAOS_PRESETS   = Path(__file__).parent / "chaos_presets.json"  # presets + timeline
 SEQUENCES_DIR.mkdir(exist_ok=True)
 
 # Name of a sequence in SEQUENCES_DIR to run automatically on boot (loop mode).
@@ -795,6 +796,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json([f.stem for f in files])
             return
 
+        if path == "/api/presets":
+            if CHAOS_PRESETS.exists():
+                try:
+                    data = json.loads(CHAOS_PRESETS.read_text())
+                except Exception:
+                    data = {"presets": {}, "timeline": []}
+            else:
+                data = {"presets": {}, "timeline": []}
+            self.send_json(data)
+            return
+
         if path.startswith("/api/sequences/"):
             name = path.split("/api/sequences/")[1]
             f = SEQUENCES_DIR / f"{name}.json"
@@ -872,6 +884,15 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/osc/stop":
             osc_engine.stop()
+            self.send_json({"ok": True})
+            return
+
+        if path == "/api/presets":
+            payload = {
+                "presets":  data.get("presets", {}),
+                "timeline": data.get("timeline", []),
+            }
+            CHAOS_PRESETS.write_text(json.dumps(payload, indent=2))
             self.send_json({"ok": True})
             return
 

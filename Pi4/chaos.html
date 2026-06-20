@@ -382,13 +382,46 @@ let timeline = [];         // [{presetName, duration}]
 const PRESETS_KEY = 'whip_presets';
 const TIMELINE_KEY = 'whip_timeline';
 
-function loadPresetsFromStorage() {
+// Save to localStorage (instant, offline) and mirror to the Pi4 (cross-device,
+// survives cache clears). Server is treated as the shared source of truth.
+function persist() {
   try {
-    presets = JSON.parse(localStorage.getItem(PRESETS_KEY) || '{}');
-    timeline = JSON.parse(localStorage.getItem(TIMELINE_KEY) || '[]');
+    localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+    localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
   } catch {}
+  fetch(`${BASE}/api/presets`, {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({presets, timeline}), signal:AbortSignal.timeout(3000),
+  }).catch(()=>{});
+}
+
+function refreshPresetUI() {
   updatePresetsUI();
   updateTimelineUI();
+  updateTimelineSelect();
+}
+
+function loadPresetsFromStorage() {
+  // localStorage first for an instant paint…
+  try {
+    presets  = JSON.parse(localStorage.getItem(PRESETS_KEY) || '{}');
+    timeline = JSON.parse(localStorage.getItem(TIMELINE_KEY) || '[]');
+  } catch {}
+  refreshPresetUI();
+  // …then prefer the Pi4 copy if it's reachable
+  fetch(`${BASE}/api/presets`, {signal:AbortSignal.timeout(3000)})
+    .then(r => r.ok ? r.json() : null)
+    .then(d => {
+      if (!d) return;
+      if (d.presets)  presets  = d.presets;
+      if (d.timeline) timeline = d.timeline;
+      try {
+        localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+        localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
+      } catch {}
+      refreshPresetUI();
+    })
+    .catch(()=>{});
 }
 
 function savePreset() {
@@ -408,7 +441,7 @@ function savePreset() {
     cscale: +ge('cscale').value, csim: +ge('csim').value,
     timestamp: new Date().toLocaleString()
   };
-  localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  persist();
   ge('preset-name-input').value = '';
   updatePresetsUI();
   updateTimelineSelect();
@@ -455,7 +488,7 @@ function loadPreset(name) {
 
 function deletePreset(name) {
   delete presets[name];
-  localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
+  persist();
   updatePresetsUI();
   updateTimelineSelect();
 }
@@ -492,13 +525,13 @@ function addToTimeline() {
   const dur = +ge('timeline-duration').value;
   const easing = ge('timeline-easing').value;
   timeline.push({presetName: name, duration: dur, easing});
-  localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
+  persist();
   updateTimelineUI();
 }
 
 function removeFromTimeline(idx) {
   timeline.splice(idx, 1);
-  localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
+  persist();
   updateTimelineUI();
 }
 
