@@ -64,7 +64,7 @@ fi
 # ── Server ────────────────────────────────────────────────────────────────────
 if [[ $SERVER -eq 1 ]]; then
   echo "▶ Copying server files to Pi4..."
-  scp "Pi4/server.py" "Pi4/mobile.html" "$PI:$REMOTE_DIR/"
+  scp "Pi4/server.py" "Pi4/mobile.html" "Pi4/chaos.html" "$PI:$REMOTE_DIR/"
 
   echo "▶ Restarting whip service..."
   ssh "$PI" "sudo systemctl restart whip"
