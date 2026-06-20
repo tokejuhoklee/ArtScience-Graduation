@@ -66,6 +66,8 @@ volatile long stepsRemaining = 0;
 volatile bool stepDir = 0;
 volatile unsigned long stepIntervalMicros = 1000;
 const unsigned int STEP_PULSE_WIDTH_US = 4;
+const unsigned int DIR_SETUP_US = 5;   // DIR must be stable this long before a step edge
+volatile int appliedDir = -1;          // direction currently latched on DIR_PIN (-1 = none)
 volatile bool stepPulseInProgress = false;
 volatile unsigned long nextStepTime = 0;
 volatile long initialStepsScheduled = 0;
@@ -185,9 +187,19 @@ void stepperTick() {
   }
 
   if (stepsRemaining > 0 && now >= nextStepTime) {
+    // On a direction change, latch DIR and wait DIR_SETUP_US before the step
+    // edge — otherwise the driver can clock the first step the wrong way,
+    // walking the oscillation centre off to one side over many reversals.
+    if (stepDir != appliedDir) {
+      digitalWrite(DIR_PIN, stepDir ? HIGH : LOW);
+      appliedDir = stepDir;
+      nextStepTime = now + DIR_SETUP_US;
+      return;
+    }
+
     long stepsCompleted = initialStepsScheduled - stepsRemaining;
     int stepSpeed = currentSpeed;
-    
+
     // SOFT START — ramp up over first startupRampSteps
     if (enableSoftStart && stepsCompleted < startupRampSteps && initialStepsScheduled > startupRampSteps) {
       float rampFraction = (float)stepsCompleted / (float)startupRampSteps;
@@ -201,8 +213,7 @@ void stepperTick() {
       stepSpeed = constrain(stepSpeed, minBrakeSpeed, currentSpeed);
     }
 
-    digitalWrite(DIR_PIN, stepDir ? HIGH : LOW);
-    digitalWrite(STEP_PIN, HIGH);
+    digitalWrite(STEP_PIN, HIGH);     // DIR already latched & settled above
     stepPulseInProgress = true;
     nextStepTime = now + STEP_PULSE_WIDTH_US;
 
