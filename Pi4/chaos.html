@@ -75,13 +75,16 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
   color:#c0c0e0;cursor:pointer;font-size:9px;flex-shrink:0}
 .preset-btn:hover{background:#2a2a42}
 
-.timeline-item{display:grid;grid-template-columns:1fr 40px 60px 45px;gap:6px;padding:8px;
+.timeline-item{display:grid;grid-template-columns:1fr 46px 64px 32px;gap:6px;padding:8px;
   background:#04040a;border:1px solid #1c1c30;border-radius:5px;align-items:center;font-size:10px}
-.timeline-preset{color:#9c7cff;text-overflow:ellipsis;overflow:hidden}
-.timeline-duration{padding:4px 8px;background:#181828;border:1px solid #2a2a42;border-radius:3px;
-  color:#c0c0e0;text-align:center;width:50px;font-size:9px}
-.timeline-del{padding:4px 8px;background:#6c2c2c;border:1px solid #8c4c4c;border-radius:3px;
-  color:#ec6c6c;cursor:pointer;font-size:9px}
+.timeline-preset{color:#9c7cff;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;
+  cursor:pointer}
+.timeline-preset:hover{text-decoration:underline}
+.tl-dur,.tl-ease{padding:4px 5px;background:#181828;border:1px solid #2a2a42;border-radius:3px;
+  color:#c0c0e0;font-size:9px;font-family:monospace;width:100%}
+.tl-dur{text-align:center}
+.timeline-del{padding:4px 6px;background:#6c2c2c;border:1px solid #8c4c4c;border-radius:3px;
+  color:#ec6c6c;cursor:pointer;font-size:9px;text-align:center}
 .timeline-del:hover{background:#8c4c4c}
 </style>
 </head>
@@ -268,6 +271,13 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     <div class="card">
       <span class="card-label">Timeline Sequence</span>
       <div id="timeline-list" class="preset-list"></div>
+      <div class="btn-row" style="margin-top:8px">
+        <div class="btn run" onclick="playTimeline()">▶ Play Timeline</div>
+        <div class="btn stop" onclick="doStop()">⬛ Stop</div>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a;margin-top:4px">
+        tap a preset name to open &amp; edit it
+      </div>
     </div>
     <div class="card">
       <span class="card-label">Add Preset to Timeline</span>
@@ -451,6 +461,10 @@ function loadPreset(name) {
   const p = presets[name];
   if (!p) return;
 
+  // Pre-fill the name so tweak → Save updates this same preset (and its
+  // timeline references, which are by name)
+  ge('preset-name-input').value = name;
+
   // Switch to preset's mode if different
   const targetMode = p.mode || 'chaos';
   if (targetMode !== mode && (targetMode === 'sine' || targetMode === 'chaos')) switchTab(targetMode);
@@ -540,18 +554,44 @@ function updateTimelineUI() {
   const dur = timeline.reduce((s,t)=>s+t.duration, 0);
   ge('timeline-total-duration').textContent = dur.toFixed(1);
 
+  const easings = ['linear','ease-in','ease-in-out','ease-out'];
   list.innerHTML = timeline.map((t,i) => {
     const p = presets[t.presetName];
     const modeTag = p ? ((p.mode==='sine') ? '~' : '∞') : '?';
     const modeColor = p ? ((p.mode==='sine') ? '#5c7cfc' : '#9c7cff') : '#4a4a6a';
+    const opts = easings.map(e =>
+      `<option value="${e}" ${e===(t.easing||'linear')?'selected':''}>${e}</option>`).join('');
     return `<div class="timeline-item">
-      <span style="color:${modeColor}">${modeTag} ${t.presetName}</span>
-      <span style="font-size:9px;color:#4a4a6a">${t.duration}s</span>
-      <span style="font-size:9px;color:#3a3a52">${t.easing||'linear'}</span>
-      <div class="timeline-del" onclick="removeFromTimeline(${i})">Del</div>
+      <span class="timeline-preset" style="color:${modeColor}"
+        onclick="loadPreset('${t.presetName}')" title="open & edit this preset">${modeTag} ${t.presetName}</span>
+      <input class="tl-dur" type="number" min="0.5" max="60" step="0.5" value="${t.duration}"
+        onchange="editTimelineDuration(${i}, this.value)" title="transition seconds">
+      <select class="tl-ease" onchange="editTimelineEasing(${i}, this.value)" title="easing">${opts}</select>
+      <div class="timeline-del" onclick="removeFromTimeline(${i})">✕</div>
     </div>`;
   }).join('');
   if (timeline.length === 0) list.innerHTML = '<div style="color:#4a4a6a;font-size:9px;padding:8px">No timeline items yet</div>';
+}
+
+function editTimelineDuration(i, val) {
+  const v = +val;
+  if (!isNaN(v) && v > 0) {
+    timeline[i].duration = v;
+    persist();
+    ge('timeline-total-duration').textContent =
+      timeline.reduce((s,t)=>s+t.duration, 0).toFixed(1);
+  }
+}
+
+function editTimelineEasing(i, val) {
+  timeline[i].easing = val;
+  persist();
+}
+
+async function playTimeline() {
+  if (timeline.length === 0) return;
+  if (tab !== 'timeline') switchTab('timeline');
+  await doRun();
 }
 
 // ── WebSocket ──────────────────────────────────────────────────────────────
