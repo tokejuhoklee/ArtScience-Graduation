@@ -37,6 +37,8 @@ int moveRange = 0;
 int currentSpeed = 100;
 int minSpeed = 50, maxSpeed = 3000;
 int minBrakeSpeed = 50;
+
+bool quietMode = false;   // suppress serial logging during high-rate oscillator control
 bool enableBraking = true;
 
 unsigned long pendulumDelay = 500;
@@ -75,6 +77,7 @@ bool enableSoftStart = true;
 // === UTILITIES ===
 //
 void printLog(const String &m) {
+  if (quietMode) return;
   Serial.println(m);
 }
 
@@ -359,9 +362,17 @@ void handleSerialCommands() {
           enableSoftStart = true; 
           printLog("Soft-start ON"); 
         }
-        else if (cmd == "softstartoff") { 
-          enableSoftStart = false; 
-          printLog("Soft-start OFF"); 
+        else if (cmd == "softstartoff") {
+          enableSoftStart = false;
+          printLog("Soft-start OFF");
+        }
+        else if (cmd == "quieton") {
+          printLog("Quiet mode ON");
+          quietMode = true;
+        }
+        else if (cmd == "quietoff") {
+          quietMode = false;
+          printLog("Quiet mode OFF");
         }
         else if (cmd == "calibrate") {
           long shift = currentPosition;
