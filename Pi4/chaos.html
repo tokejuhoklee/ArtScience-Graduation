@@ -264,6 +264,19 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
         <div class="btn" onclick="savePreset()" style="flex:0;padding:8px 14px;width:auto">Save</div>
       </div>
     </div>
+    <div class="card">
+      <span class="card-label">Backup</span>
+      <div class="btn-row">
+        <div class="btn" onclick="exportPresets()">⬇ Export</div>
+        <div class="btn" onclick="ge('import-file').click()">⬆ Import</div>
+      </div>
+      <input type="file" id="import-file" accept="application/json,.json"
+        style="display:none" onchange="importPresets(this)">
+      <div style="font-size:9px;color:#4a4a6a">
+        export presets + timeline to a file; import (or drop it on the Pi4 as
+        chaos_presets.json) to load them
+      </div>
+    </div>
   </div><!-- /panel-presets -->
 
   <!-- ── TIMELINE PANEL ─────────────────────────────────────────────── -->
@@ -418,6 +431,40 @@ function refreshPresetUI() {
   updatePresetsUI();
   updateTimelineUI();
   updateTimelineSelect();
+}
+
+// Export presets + timeline to a file (same format the Pi4 stores in
+// chaos_presets.json) — works offline.
+function exportPresets() {
+  const data = JSON.stringify({presets, timeline}, null, 2);
+  const blob = new Blob([data], {type:'application/json'});
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `whip-presets-${new Date().toISOString().slice(0,10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Import a file: merge presets (overwrite by name), replace the timeline,
+// then persist (localStorage + Pi4 if reachable).
+function importPresets(input) {
+  const file = input.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const d = JSON.parse(reader.result);
+      if (d.presets)  Object.assign(presets, d.presets);
+      if (d.timeline) timeline = d.timeline;
+      persist();
+      refreshPresetUI();
+    } catch (e) {
+      alert('Could not read that file — expected JSON with presets/timeline.');
+    }
+    input.value = '';   // allow re-importing the same file
+  };
+  reader.readAsText(file);
 }
 
 function loadPresetsFromStorage() {
