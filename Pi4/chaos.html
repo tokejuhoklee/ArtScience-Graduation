@@ -339,6 +339,15 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px">
       caps amplitude so the arm can keep up — off shows the unreachable ideal
     </div>
+    <div style="display:grid;grid-template-columns:1fr 52px;gap:6px;margin-top:6px;align-items:center">
+      <div class="btn" id="home-btn" onclick="doHome()" style="padding:9px">⌂ Re-zero (drop &amp; settle)</div>
+      <input type="number" id="home-settle" min="2" max="30" step="1" value="8" title="settle seconds"
+        style="padding:6px;background:#04040a;border:1px solid #181828;border-radius:4px;
+        color:#c0c0e0;font-family:monospace;font-size:10px;text-align:center">
+    </div>
+    <div style="font-size:9px;color:#4a4a6a;padding:2px 0 0">
+      de-energizes so gravity pulls the arm to rest, then sets that point as 0°
+    </div>
   </div>
 
 </div><!-- /scroll -->
@@ -1286,6 +1295,29 @@ async function doOff() {
     await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
     await fetch(`${BASE}/api/cmd?c=off`,{signal:AbortSignal.timeout(3000)});
   } catch {}
+}
+
+// Gravity home: de-energize, let the arm hang & settle, then zero at that rest.
+async function doHome() {
+  const settle = Math.round(+ge('home-settle').value || 8);
+  const btn = ge('home-btn');
+  doStop();
+  btn.style.pointerEvents = 'none'; btn.style.opacity = '0.6';
+  try {
+    await fetch(`${BASE}/api/home`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({settle}), signal: AbortSignal.timeout(3000),
+    });
+  } catch {}
+  let left = settle;
+  btn.textContent = `Homing… ${left}s`;
+  const iv = setInterval(() => {
+    if (--left > 0) { btn.textContent = `Homing… ${left}s`; return; }
+    clearInterval(iv);
+    btn.textContent = '⌂ Re-zero (drop & settle)';
+    btn.style.pointerEvents = ''; btn.style.opacity = '';
+    motorAngle = 0;          // new zero — reflect it in the preview
+  }, 1000);
 }
 
 function scheduleUpdate() {

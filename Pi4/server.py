@@ -887,6 +887,21 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"ok": True})
             return
 
+        if path == "/api/home":
+            # Gravity home: de-energize so the arm hangs to its rest, let it
+            # settle, then zero there. Runs in a thread so it survives the
+            # browser disconnecting (consistent with the engine design).
+            settle = float(data.get("settle", 8.0))
+            settle = max(1.0, min(30.0, settle))
+            osc_engine.stop()
+            def _home():
+                serial_mgr.send("off")        # gravity pulls the arm down
+                time.sleep(settle)            # let the pendulum settle
+                serial_mgr.send("calibrate")  # this rest point becomes 0
+            threading.Thread(target=_home, daemon=True).start()
+            self.send_json({"ok": True, "settle": settle})
+            return
+
         if path == "/api/presets":
             payload = {
                 "presets":  data.get("presets", {}),
