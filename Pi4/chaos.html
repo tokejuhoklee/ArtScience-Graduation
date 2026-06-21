@@ -86,6 +86,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
 .timeline-del{padding:4px 6px;background:#6c2c2c;border:1px solid #8c4c4c;border-radius:3px;
   color:#ec6c6c;cursor:pointer;font-size:9px;text-align:center}
 .timeline-del:hover{background:#8c4c4c}
+.timeline-item.active{border-color:#7c5cfc;background:#0f0a1e;box-shadow:0 0 6px rgba(124,92,252,.35)}
 </style>
 </head>
 <body>
@@ -778,6 +779,8 @@ function rafLoop(ts) {
   }
   if (!_canvasW) return;
 
+  applyTimelineFrame();   // drive sliders/canvas from the timeline while it plays
+
   const W = _canvasW, H = 200;
   ctx.clearRect(0, 0, W, H);
   if (mode === 'sine') drawSine(W, H, dt);
@@ -1141,6 +1144,59 @@ function getTimelineParams(elapsedS) {
   const last = presets[timeline[timeline.length-1].presetName];
   return last || null;
 }
+
+function timelineActiveIndex(elapsedS) {
+  let acc = 0;
+  for (let i = 0; i < timeline.length; i++) {
+    acc += timeline[i].duration;
+    if (elapsedS < acc) return i;
+  }
+  return timeline.length - 1;
+}
+
+// Set a slider's value and its readout (no 'input' event fired).
+function setSliderVal(id, v) {
+  if (v === undefined || v === null) return;
+  const el = ge(id); if (!el) return;
+  el.value = v;
+  const fmt = SLIDERS.find(s => s[0] === id)?.[1];
+  const vl = ge(id + '-v'); if (vl && fmt) vl.textContent = fmt(el.value);
+}
+
+// While a timeline plays, drive the on-screen sliders + canvas from the
+// interpolated params so the editor visibly morphs through the presets.
+let _tlActiveIdx = -1;
+function applyTimelineFrame() {
+  if (!activeTimeline || runT0 === null) { _tlActiveIdx = -1; return; }
+  const elapsed = (Date.now() - runT0) / 1000;
+  const tl = getTimelineParams(elapsed);
+  if (!tl) return;
+
+  mode = (tl.mode === 'sine') ? 'sine' : 'chaos';   // canvas follows the segment
+  if (mode === 'sine') {
+    setSliderVal('s1a', tl.s1a); setSliderVal('s1f', tl.s1f); setSliderVal('s1p', tl.s1p);
+    setSliderVal('s2a', tl.s2a); setSliderVal('s2f', tl.s2f); setSliderVal('s2p', tl.s2p);
+  } else {
+    setSliderVal('cscale', tl.cscale); setSliderVal('csim', tl.csim);
+    setSliderVal('cL1', tl.cL1); setSliderVal('cL2', tl.cL2);
+    setSliderVal('cm1', tl.cm1); setSliderVal('cm2', tl.cm2);
+    setSliderVal('cdamp', tl.cdamp);
+    if (chaosDP) {           // morph the live sim's physics continuously
+      chaosDP.L1 = tl.cL1; chaosDP.L2 = tl.cL2;
+      chaosDP.m1 = tl.cm1; chaosDP.m2 = tl.cm2;
+      chaosDP.damping = tl.cdamp;
+    }
+  }
+
+  const idx = timelineActiveIndex(elapsed);   // highlight the current step
+  if (idx !== _tlActiveIdx) {
+    _tlActiveIdx = idx;
+    const items = ge('timeline-list').children;
+    for (let i = 0; i < items.length; i++)
+      if (items[i].classList) items[i].classList.toggle('active', i === idx);
+  }
+}
+
 const SLIDERS = [
   ['s1a',  v=>v+'°'],
   ['s1f',  v=>(+v).toFixed(2)+' Hz'],
@@ -1299,6 +1355,7 @@ async function doRun() {
 
   runT0 = Date.now();
   oscPhase1 = oscPhase2 = 0;   // clean centered start, matching the server
+  if (activeTimeline) applyTimelineFrame();   // seed sliders/mode from first segment
   if (mode==='chaos' || activeTimeline) {
     resetChaos();
   }
@@ -1327,6 +1384,8 @@ async function doStop() {
   runT0=null;
   activeTimeline=false;
   clearInterval(tlTimer);
+  _tlActiveIdx = -1;
+  document.querySelectorAll('.timeline-item.active').forEach(el => el.classList.remove('active'));
   try {
     await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
   } catch {}
