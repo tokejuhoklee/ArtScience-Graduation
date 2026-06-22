@@ -506,8 +506,10 @@ function loadPresetsFromStorage() {
     .then(r => r.ok ? r.json() : null)
     .then(d => {
       if (!d) return;
-      if (d.presets)  presets  = d.presets;
-      if (d.timeline) timeline = d.timeline;
+      // Only let the server override local data if it actually has content,
+      // so a fresh/empty Pi4 can't wipe a timeline built offline.
+      if (d.presets && Object.keys(d.presets).length)   presets  = d.presets;
+      if (Array.isArray(d.timeline) && d.timeline.length) timeline = d.timeline;
       if (typeof d.loop === 'boolean') loopTimeline = d.loop;
       try {
         localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
