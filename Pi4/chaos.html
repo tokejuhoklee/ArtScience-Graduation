@@ -289,8 +289,19 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
         <div class="btn run" onclick="playTimeline()">▶ Play Timeline</div>
         <div class="btn stop" onclick="doStop()">⬛ Stop</div>
       </div>
+      <div class="tog-row" style="margin-top:8px">
+        <span>Loop (restart when it ends)</span>
+        <div class="tog" id="tog-loop" onclick="this.classList.toggle('on'); updateLoop()"></div>
+      </div>
       <div style="font-size:9px;color:#4a4a6a;margin-top:4px">
         tap a preset name to open &amp; edit it
+      </div>
+      <div class="btn-row" style="margin-top:8px">
+        <div class="btn" onclick="exportPresets()">⬇ Export</div>
+        <div class="btn" onclick="ge('import-file').click()">⬆ Import</div>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a;margin-top:2px">
+        saves this timeline + its presets (and loop) to a file
       </div>
     </div>
     <div class="card">
@@ -406,6 +417,7 @@ let phaseTrail = [];       // [{th, w}] for phase portrait
 let lastRaf = 0;
 let updateTimer = null;
 let activeTimeline = false; // running timeline sequence
+let loopTimeline = false;   // restart the sequence when it finishes
 let tlTimer = null;         // interval pushing interpolated timeline params
 const TL_PUSH_MS = 200;     // how often timeline params are pushed to server
 
@@ -414,6 +426,7 @@ let presets = {};          // {name: {cL1, cL2, cm1, cm2, cth1, cth2, cw1, cdamp
 let timeline = [];         // [{presetName, duration}]
 const PRESETS_KEY = 'whip_presets';
 const TIMELINE_KEY = 'whip_timeline';
+const LOOP_KEY = 'whip_loop';
 
 // Save to localStorage (instant, offline) and mirror to the Pi4 (cross-device,
 // survives cache clears). Server is treated as the shared source of truth.
@@ -421,11 +434,22 @@ function persist() {
   try {
     localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
     localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
+    localStorage.setItem(LOOP_KEY, loopTimeline ? '1' : '0');
   } catch {}
   fetch(`${BASE}/api/presets`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({presets, timeline}), signal:AbortSignal.timeout(3000),
+    body: JSON.stringify({presets, timeline, loop: loopTimeline}), signal:AbortSignal.timeout(3000),
   }).catch(()=>{});
+}
+
+function setLoopUI() {
+  const t = ge('tog-loop');
+  if (t) t.classList.toggle('on', loopTimeline);
+}
+
+function updateLoop() {
+  loopTimeline = ge('tog-loop').classList.contains('on');
+  persist();
 }
 
 function refreshPresetUI() {
@@ -437,7 +461,7 @@ function refreshPresetUI() {
 // Export presets + timeline to a file (same format the Pi4 stores in
 // chaos_presets.json) — works offline.
 function exportPresets() {
-  const data = JSON.stringify({presets, timeline}, null, 2);
+  const data = JSON.stringify({presets, timeline, loop: loopTimeline}, null, 2);
   const blob = new Blob([data], {type:'application/json'});
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
@@ -458,6 +482,7 @@ function importPresets(input) {
       const d = JSON.parse(reader.result);
       if (d.presets)  Object.assign(presets, d.presets);
       if (d.timeline) timeline = d.timeline;
+      if (typeof d.loop === 'boolean') { loopTimeline = d.loop; setLoopUI(); }
       persist();
       refreshPresetUI();
     } catch (e) {
@@ -473,8 +498,9 @@ function loadPresetsFromStorage() {
   try {
     presets  = JSON.parse(localStorage.getItem(PRESETS_KEY) || '{}');
     timeline = JSON.parse(localStorage.getItem(TIMELINE_KEY) || '[]');
+    loopTimeline = localStorage.getItem(LOOP_KEY) === '1';
   } catch {}
-  refreshPresetUI();
+  refreshPresetUI(); setLoopUI();
   // …then prefer the Pi4 copy if it's reachable
   fetch(`${BASE}/api/presets`, {signal:AbortSignal.timeout(3000)})
     .then(r => r.ok ? r.json() : null)
@@ -482,11 +508,13 @@ function loadPresetsFromStorage() {
       if (!d) return;
       if (d.presets)  presets  = d.presets;
       if (d.timeline) timeline = d.timeline;
+      if (typeof d.loop === 'boolean') loopTimeline = d.loop;
       try {
         localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
         localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
+        localStorage.setItem(LOOP_KEY, loopTimeline ? '1' : '0');
       } catch {}
-      refreshPresetUI();
+      refreshPresetUI(); setLoopUI();
     })
     .catch(()=>{});
 }
@@ -1111,6 +1139,17 @@ function interpolate(a, b, t) {
   return a + (b - a) * Math.max(0, Math.min(1, t));
 }
 
+// Elapsed seconds into the timeline; wraps to the start when looping.
+function timelineElapsed() {
+  if (runT0 === null) return 0;
+  let e = (Date.now() - runT0) / 1000;
+  if (loopTimeline) {
+    const total = timeline.reduce((s, t) => s + t.duration, 0);
+    if (total > 0) e = e % total;
+  }
+  return e;
+}
+
 function getTimelineParams(elapsedS) {
   if (timeline.length === 0) return null;
 
@@ -1168,7 +1207,7 @@ function setSliderVal(id, v) {
 let _tlActiveIdx = -1;
 function applyTimelineFrame() {
   if (!activeTimeline || runT0 === null) { _tlActiveIdx = -1; return; }
-  const elapsed = (Date.now() - runT0) / 1000;
+  const elapsed = timelineElapsed();
   const tl = getTimelineParams(elapsed);
   if (!tl) return;
 
@@ -1302,7 +1341,7 @@ function buildParams() {
 
   // Timeline overrides everything when active
   if (activeTimeline && timeline.length > 0 && runT0 !== null) {
-    const elapsedS = (Date.now() - runT0) / 1000;
+    const elapsedS = timelineElapsed();
     const tl = getTimelineParams(elapsedS);
     if (tl) {
       if ((tl.mode || 'chaos') === 'sine') {

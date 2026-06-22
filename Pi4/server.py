@@ -801,9 +801,9 @@ class Handler(BaseHTTPRequestHandler):
                 try:
                     data = json.loads(CHAOS_PRESETS.read_text())
                 except Exception:
-                    data = {"presets": {}, "timeline": []}
+                    data = {"presets": {}, "timeline": [], "loop": False}
             else:
-                data = {"presets": {}, "timeline": []}
+                data = {"presets": {}, "timeline": [], "loop": False}
             self.send_json(data)
             return
 
@@ -906,6 +906,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = {
                 "presets":  data.get("presets", {}),
                 "timeline": data.get("timeline", []),
+                "loop":     bool(data.get("loop", False)),
             }
             CHAOS_PRESETS.write_text(json.dumps(payload, indent=2))
             self.send_json({"ok": True})
