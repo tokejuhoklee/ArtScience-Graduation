@@ -428,10 +428,14 @@ void handleSerialCommands() {
 //
 // === SETUP ===
 //
+// Time to let the arm hang and settle at its gravity rest during boot homing.
+// Tune to your hardware: longer if the arm is still swinging when motion starts.
+const unsigned long BOOT_SETTLE_MS = 8000;
+
 void setup() {
   Serial.begin(115200);
   delay(200);
-  
+
   // Setup pins
   pinMode(STEP_PIN, OUTPUT); digitalWrite(STEP_PIN, LOW);
   pinMode(DIR_PIN, OUTPUT);  digitalWrite(DIR_PIN, LOW);
@@ -443,12 +447,21 @@ void setup() {
 
   updateGearReduction();
   updateMoveRangeFromAngle();
-  
+
   printLog("=== Pico Stepper Controller ===");
-  printLog("Serial control ready");
-  printLog("Type 'help' for commands");
-  
+
+  // Gravity home on boot: de-energize so the arm falls to its hanging rest,
+  // let it settle, then make that point 0. This is why the motion came up
+  // off-centre before — boot never established the rest as zero. The Pi4
+  // server waits a few seconds before sending anything, and any commands
+  // that arrive during the settle just queue until loop() starts.
   setMotorEnabled(false);
+  printLog("Boot: settling to gravity rest...");
+  delay(BOOT_SETTLE_MS);
+  currentPosition = 0;
+  currentTarget   = 0;
+  appliedDir      = -1;   // force DIR re-latch on the first step
+  printLog("Boot home complete. Rest = 0. Type 'help' for commands.");
 }
 
 //
