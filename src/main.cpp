@@ -428,10 +428,18 @@ void handleSerialCommands() {
 //
 // === SETUP ===
 //
+// Boot gravity-home: stay de-energized so the arm falls to its hanging rest,
+// then treat that point as 0. Non-blocking (see loop()) and incoming commands
+// are discarded until settled, so a queued on/move can't fire early and throw
+// the zero off — that was the bug in the first (blocking) version.
+const unsigned long BOOT_SETTLE_MS = 8000;   // tune to how long the arm takes to still
+bool booting = true;
+unsigned long bootStart = 0;
+
 void setup() {
   Serial.begin(115200);
   delay(200);
-  
+
   // Setup pins
   pinMode(STEP_PIN, OUTPUT); digitalWrite(STEP_PIN, LOW);
   pinMode(DIR_PIN, OUTPUT);  digitalWrite(DIR_PIN, LOW);
@@ -443,21 +451,36 @@ void setup() {
 
   updateGearReduction();
   updateMoveRangeFromAngle();
-  
+
   printLog("=== Pico Stepper Controller ===");
-  printLog("Serial control ready");
-  printLog("Type 'help' for commands");
-  
-  setMotorEnabled(false);
+  printLog("Boot: settling to gravity rest...");
+
+  setMotorEnabled(false);   // de-energize so gravity pulls the arm to rest
+  booting = true;
+  bootStart = millis();
 }
 
 //
 // === LOOP ===
 //
 void loop() {
+  // Boot gravity-home: motor stays off so the arm settles to rest; discard any
+  // commands until BOOT_SETTLE_MS elapses, then zero there. Non-blocking.
+  if (booting) {
+    while (Serial.available() > 0) Serial.read();   // drop queued commands
+    if (millis() - bootStart >= BOOT_SETTLE_MS) {
+      currentPosition = 0;
+      currentTarget   = 0;
+      appliedDir      = -1;
+      booting = false;
+      printLog("Boot home complete. Rest = 0. Type 'help' for commands.");
+    }
+    return;
+  }
+
   // Call stepperTick as fast as possible for smooth stepping
   stepperTick();
-  
+
   // Handle serial commands (but don't let it block stepping)
   if (Serial.available() > 0) {
     handleSerialCommands();
