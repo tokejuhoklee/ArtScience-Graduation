@@ -103,6 +103,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
   <div class="tab" id="tab-chaos" onclick="switchTab('chaos')">Chaos</div>
   <div class="tab" id="tab-presets" onclick="switchTab('presets')">Presets</div>
   <div class="tab" id="tab-timeline" onclick="switchTab('timeline')">Timeline</div>
+  <div class="tab" id="tab-safety" onclick="switchTab('safety')">Safety</div>
 </div>
 
 <div class="scroll">
@@ -333,6 +334,56 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
       </div>
     </div>
   </div><!-- /panel-timeline -->
+
+  <!-- ── SAFETY PANEL ───────────────────────────────────────────────── -->
+  <div id="panel-safety" style="display:none">
+    <div id="safety-banner" style="display:none;padding:10px;border-radius:8px;margin-bottom:8px;
+      background:#2a0808;border:1px solid #6c2c2c;color:#fc6c6c;font-size:12px;text-align:center">
+      ⚠ SAFETY TRIPPED — <span id="safety-reason"></span>
+    </div>
+    <div class="card" style="padding:6px">
+      <div id="safety-wrap" style="position:relative;width:100%;background:#04040a;border-radius:6px;overflow:hidden">
+        <img id="safety-cam" style="width:100%;display:block" alt="camera">
+        <svg id="safety-ovl" viewBox="0 0 100 100" preserveAspectRatio="none"
+          style="position:absolute;inset:0;width:100%;height:100%;touch-action:none">
+          <rect id="ovl-danger" x="0" y="55" width="100" height="45" fill="rgba(220,60,60,0.18)"/>
+          <line id="ovl-line" x1="0" y1="55" x2="100" y2="55" stroke="#fc4c4c" stroke-width="0.8"/>
+          <rect id="ovl-grab" x="0" y="51" width="100" height="8" fill="transparent" style="cursor:row-resize"/>
+        </svg>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a;margin-top:4px">
+        drag the red line; the shaded side is the danger zone (the whip side)
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-label">Detection</span>
+      <div class="tog-row">
+        <span>Danger zone is below the line</span>
+        <div class="tog on" id="tog-danger" onclick="this.classList.toggle('on'); pushSafetyConfig()"></div>
+      </div>
+      <div class="prow">
+        <span class="plabel">Sens</span>
+        <input type="range" id="saf-sens" min="0.005" max="0.2" step="0.005" value="0.03">
+        <span class="pval" id="saf-sens-v">3.0%</span>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a;padding:0 0 2px 52px">
+        min share of the zone that must change to trip · live: <span id="saf-fg">0%</span>
+      </div>
+    </div>
+
+    <div class="card">
+      <span class="card-label">Status: <span id="saf-status">disarmed</span></span>
+      <div class="btn-row">
+        <div class="btn run" id="saf-arm" onclick="armSafety()">● Arm</div>
+        <div class="btn" onclick="disarmSafety()">Disarm</div>
+        <div class="btn stop" onclick="rearmSafety()">↺ Re-arm</div>
+      </div>
+      <div id="saf-cv-warn" style="display:none;font-size:9px;color:#fc6c6c;margin-top:4px">
+        OpenCV not available on the Pi4 — detection cannot run.
+      </div>
+    </div>
+  </div><!-- /panel-safety -->
 
   <!-- ── MOTOR ─────────────────────────────────────────────────────── -->
   <div class="card">
@@ -701,6 +752,7 @@ function connectWS() {
             updatePosBar(d.osc.angle);
           }
         }
+        if (d.safety !== undefined) applySafetyState(d.safety, false);
       } catch {}
     };
   } catch { setDot('dot-ws', false); }
@@ -714,15 +766,18 @@ function switchTab(t) {
   ge('tab-chaos').classList.toggle('active', t === 'chaos');
   ge('tab-presets').classList.toggle('active', t === 'presets');
   ge('tab-timeline').classList.toggle('active', t === 'timeline');
+  ge('tab-safety').classList.toggle('active', t === 'safety');
   ge('panel-sine').style.display  = t === 'sine'  ? '' : 'none';
   ge('panel-chaos').style.display = t === 'chaos' ? '' : 'none';
   ge('panel-presets').style.display = t === 'presets' ? '' : 'none';
   ge('panel-timeline').style.display = t === 'timeline' ? '' : 'none';
+  ge('panel-safety').style.display = t === 'safety' ? '' : 'none';
   if (t === 'chaos' && !chaosDP) resetChaos();
   if (t === 'presets' || t === 'timeline') {
     if (t === 'presets') updatePresetsUI();
     if (t === 'timeline') updateTimelineUI();
   }
+  if (t === 'safety') openSafety();
   bob2Trail = []; phaseTrail = [];
 }
 
@@ -1479,6 +1534,90 @@ function scheduleUpdate() {
     } catch {}
   }, 220);
 }
+
+// ── Safety (camera proximity cutoff) ─────────────────────────────────────────
+let safetyTripY = 0.55, safetyBelow = true, safetyDragging = false;
+let safetyCfgTimer = null;
+
+function openSafety() {
+  const cam = ge('safety-cam');
+  if (BASE && !cam.src) cam.src = `${BASE}/stream`;   // start the MJPEG stream
+  fetch(`${BASE}/api/safety`, {signal:AbortSignal.timeout(3000)})
+    .then(r => r.ok ? r.json() : null)
+    .then(s => { if (s) applySafetyState(s, true); })
+    .catch(()=>{});
+}
+
+// Reflect server state in the UI. `full` also syncs the controls (used on open).
+function applySafetyState(s, full) {
+  if (!safetyDragging) { safetyTripY = s.trip_y; safetyBelow = s.danger_below; }
+  ge('safety-banner').style.display = s.tripped ? '' : 'none';
+  ge('safety-reason').textContent = s.reason || '';
+  ge('saf-status').textContent = s.tripped ? 'TRIPPED' : (s.armed ? 'armed' : 'disarmed');
+  ge('saf-status').style.color = s.tripped ? '#fc4c4c' : (s.armed ? '#3ccc7c' : '#7070a0');
+  ge('saf-arm').style.opacity = s.armed ? '0.5' : '';
+  ge('saf-fg').textContent = (s.fg*100).toFixed(1) + '%';
+  ge('saf-cv-warn').style.display = s.cv ? 'none' : '';
+  if (full) {
+    ge('tog-danger').classList.toggle('on', safetyBelow);
+    ge('saf-sens').value = s.min_area_frac;
+    ge('saf-sens-v').textContent = (s.min_area_frac*100).toFixed(1) + '%';
+  }
+  renderSafetyOverlay();
+}
+
+function renderSafetyOverlay() {
+  const y = safetyTripY * 100;
+  ge('ovl-line').setAttribute('y1', y); ge('ovl-line').setAttribute('y2', y);
+  ge('ovl-grab').setAttribute('y', Math.max(0, y - 4));
+  const d = ge('ovl-danger');
+  if (safetyBelow) { d.setAttribute('y', y); d.setAttribute('height', 100 - y); }
+  else             { d.setAttribute('y', 0); d.setAttribute('height', y); }
+}
+
+function pushSafetyConfig() {
+  safetyBelow = ge('tog-danger').classList.contains('on');
+  renderSafetyOverlay();
+  clearTimeout(safetyCfgTimer);
+  safetyCfgTimer = setTimeout(() => {
+    fetch(`${BASE}/api/safety/config`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        trip_y: safetyTripY, danger_below: safetyBelow,
+        min_area_frac: +ge('saf-sens').value,
+      }), signal:AbortSignal.timeout(3000),
+    }).catch(()=>{});
+  }, 200);
+}
+
+(function initSafetyDrag(){
+  const svg = ge('safety-ovl'); if (!svg) return;
+  const yFromEvent = e => {
+    const r = svg.getBoundingClientRect();
+    const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+    return Math.max(0.05, Math.min(0.95, cy / r.height));
+  };
+  const move = e => { if (!safetyDragging) return; safetyTripY = yFromEvent(e); renderSafetyOverlay(); pushSafetyConfig(); e.preventDefault(); };
+  const up   = () => { safetyDragging = false; };
+  const down = e => { safetyDragging = true; safetyTripY = yFromEvent(e); renderSafetyOverlay(); pushSafetyConfig(); };
+  ge('ovl-grab').addEventListener('pointerdown', down);
+  ge('ovl-line').addEventListener('pointerdown', down);
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+})();
+
+function armSafety()   { fetch(`${BASE}/api/safety/arm`,    {method:'POST',signal:AbortSignal.timeout(3000)}).then(r=>r.json()).then(s=>applySafetyState(s,true)).catch(()=>{}); }
+function disarmSafety(){ fetch(`${BASE}/api/safety/disarm`, {method:'POST',signal:AbortSignal.timeout(3000)}).catch(()=>{}); }
+function rearmSafety() { fetch(`${BASE}/api/safety/rearm`,  {method:'POST',signal:AbortSignal.timeout(3000)}).then(r=>r.json()).then(s=>applySafetyState(s,true)).catch(()=>{}); }
+
+// sensitivity slider readout + push
+document.addEventListener('DOMContentLoaded', () => {
+  const s = ge('saf-sens');
+  if (s) s.addEventListener('input', () => {
+    ge('saf-sens-v').textContent = (+s.value*100).toFixed(1) + '%';
+    pushSafetyConfig();
+  });
+});
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function ge(id){ return document.getElementById(id); }
