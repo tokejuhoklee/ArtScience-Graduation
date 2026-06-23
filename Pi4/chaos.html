@@ -373,6 +373,22 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     </div>
 
     <div class="card">
+      <span class="card-label">Auto-resume</span>
+      <div class="tog-row">
+        <span>Restart when the zone clears</span>
+        <div class="tog on" id="tog-resume" onclick="this.classList.toggle('on'); pushSafetyConfig()"></div>
+      </div>
+      <div class="prow">
+        <span class="plabel">Delay</span>
+        <input type="range" id="saf-delay" min="0" max="20" step="0.5" value="3">
+        <span class="pval" id="saf-delay-v">3.0 s</span>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a;padding:0 0 2px 52px">
+        zone must stay clear this long before motion restarts
+      </div>
+    </div>
+
+    <div class="card">
       <span class="card-label">Status: <span id="saf-status">disarmed</span></span>
       <div class="btn-row">
         <div class="btn run" id="saf-arm" onclick="armSafety()">● Arm</div>
@@ -1562,6 +1578,11 @@ function applySafetyState(s, full) {
     ge('tog-danger').classList.toggle('on', safetyBelow);
     ge('saf-sens').value = s.min_area_frac;
     ge('saf-sens-v').textContent = (s.min_area_frac*100).toFixed(1) + '%';
+    if (s.auto_resume !== undefined) ge('tog-resume').classList.toggle('on', s.auto_resume);
+    if (s.resume_delay !== undefined) {
+      ge('saf-delay').value = s.resume_delay;
+      ge('saf-delay-v').textContent = (+s.resume_delay).toFixed(1) + ' s';
+    }
   }
   renderSafetyOverlay();
 }
@@ -1585,6 +1606,8 @@ function pushSafetyConfig() {
       body: JSON.stringify({
         trip_y: safetyTripY, danger_below: safetyBelow,
         min_area_frac: +ge('saf-sens').value,
+        auto_resume: ge('tog-resume').classList.contains('on'),
+        resume_delay: +ge('saf-delay').value,
       }), signal:AbortSignal.timeout(3000),
     }).catch(()=>{});
   }, 200);
@@ -1615,6 +1638,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const s = ge('saf-sens');
   if (s) s.addEventListener('input', () => {
     ge('saf-sens-v').textContent = (+s.value*100).toFixed(1) + '%';
+    pushSafetyConfig();
+  });
+  const dl = ge('saf-delay');
+  if (dl) dl.addEventListener('input', () => {
+    ge('saf-delay-v').textContent = (+dl.value).toFixed(1) + ' s';
     pushSafetyConfig();
   });
 });

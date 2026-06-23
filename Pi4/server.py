@@ -204,9 +204,14 @@ class SafetyMonitor:
         self.min_area_frac = 0.03    # foreground fraction of danger zone to trip
         self.diff_thresh   = 25      # per-pixel grayscale diff threshold
         self.exclude       = None    # whip ignore box [x0,y0,x1,y1] fractions, or None
+        self.auto_resume   = True    # restart motion once the zone clears
+        self.resume_delay  = 3.0     # zone must stay clear this long before resuming
         self.fg_frac       = 0.0     # current foreground fraction (for UI tuning)
         self.last_frame_t  = 0.0
         self._ref          = None    # static reference of the empty danger zone
+        self._clear_since  = None    # when the zone first became clear (while tripped)
+        self._was_running  = False   # was the oscillator running at trip time
+        self._resume_params= None    # params to restart with on auto-resume
         self._lock         = threading.Lock()
         self._load()
 
@@ -216,7 +221,10 @@ class SafetyMonitor:
             if "danger_below" in d:  self.danger_below = bool(d["danger_below"])
             if "min_area_frac" in d: self.min_area_frac = max(0.005, min(0.5, float(d["min_area_frac"])))
             if "exclude" in d:       self.exclude = d["exclude"]
-            self._ref = None         # geometry changed -> recapture reference
+            if "auto_resume" in d:   self.auto_resume = bool(d["auto_resume"])
+            if "resume_delay" in d:  self.resume_delay = max(0.0, min(60.0, float(d["resume_delay"])))
+            if any(k in d for k in ("trip_y", "danger_below", "exclude")):
+                self._ref = None     # geometry changed -> recapture reference
         self._save()
 
     def arm(self):
@@ -259,8 +267,19 @@ class SafetyMonitor:
                 thr, min_frac = self.diff_thresh, self.min_area_frac
             mask = cv2.dilate(cv2.threshold(diff, thr, 255, cv2.THRESH_BINARY)[1], None, iterations=2)
             self.fg_frac = cv2.countNonZero(mask) / max(1, reg.size)
-            if self.fg_frac > min_frac and not self.tripped:
-                self._trip("intrusion")
+            clear = self.fg_frac <= min_frac
+            if not self.tripped:
+                if not clear:
+                    self._trip("intrusion")
+            elif self.auto_resume:
+                # tripped: resume once the zone has stayed clear long enough
+                if clear:
+                    if self._clear_since is None:
+                        self._clear_since = time.time()
+                    elif time.time() - self._clear_since >= self.resume_delay:
+                        self._resume()
+                else:
+                    self._clear_since = None
         except Exception as e:
             print(f"Safety process error: {e}")
             self._trip("detector error")
@@ -273,18 +292,34 @@ class SafetyMonitor:
     def _trip(self, reason):
         self.tripped = True
         self.trip_reason = reason
+        self._clear_since = None
         try:
+            self._was_running  = osc_engine.running
+            self._resume_params = dict(osc_engine.params) if osc_engine.params else None
             osc_engine.stop()
             serial_mgr.send("off")
         except Exception as e:
             print(f"Safety trip stop error: {e}")
         print(f"!! SAFETY TRIP: {reason}")
 
+    def _resume(self):
+        self.tripped = False
+        self.trip_reason = ""
+        self._clear_since = None
+        if self._was_running and self._resume_params and _event_loop is not None:
+            try:
+                osc_engine.start(self._resume_params, _event_loop)
+                print("Safety: zone clear — motion resumed")
+            except Exception as e:
+                print(f"Safety resume error: {e}")
+        self._was_running = False
+
     def state(self):
         return {
             "armed": self.armed, "tripped": self.tripped, "reason": self.trip_reason,
             "trip_y": self.trip_y, "danger_below": self.danger_below,
             "min_area_frac": self.min_area_frac, "exclude": self.exclude,
+            "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
             "fg": round(self.fg_frac, 4), "cv": cv2 is not None,
         }
 
@@ -293,6 +328,7 @@ class SafetyMonitor:
             SAFETY_CONFIG.write_text(json.dumps({
                 "trip_y": self.trip_y, "danger_below": self.danger_below,
                 "min_area_frac": self.min_area_frac, "exclude": self.exclude,
+                "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
             }, indent=2))
         except Exception as e:
             print(f"Safety config save error: {e}")
@@ -305,6 +341,8 @@ class SafetyMonitor:
                 self.danger_below = d.get("danger_below", self.danger_below)
                 self.min_area_frac = d.get("min_area_frac", self.min_area_frac)
                 self.exclude = d.get("exclude", self.exclude)
+                self.auto_resume = d.get("auto_resume", self.auto_resume)
+                self.resume_delay = d.get("resume_delay", self.resume_delay)
         except Exception as e:
             print(f"Safety config load error: {e}")
 
@@ -1120,7 +1158,9 @@ async def main():
         else:
             print(f"Autostart: no sequence named '{AUTOSTART_SEQ}' found — skipping")
 
-    camera_mgr.start(width=1640, height=1232)
+    # 820×616 = exactly half of the 1640×1232 binned full-FOV mode — same 4:3
+    # framing (no extra crop), ~4× fewer pixels to MJPEG-encode than full res.
+    camera_mgr.start(width=820, height=616)
 
     httpd = ThreadedHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
