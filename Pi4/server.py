@@ -206,6 +206,7 @@ class SafetyMonitor:
         self.exclude       = None    # whip ignore box [x0,y0,x1,y1] fractions, or None
         self.auto_resume   = True    # restart motion once the zone clears
         self.resume_delay  = 3.0     # zone must stay clear this long before resuming
+        self.arm_on_boot   = True    # arm automatically when the server starts
         self.fg_frac       = 0.0     # current foreground fraction (for UI tuning)
         self.last_frame_t  = 0.0
         self._ref          = None    # static reference of the empty danger zone
@@ -223,6 +224,7 @@ class SafetyMonitor:
             if "exclude" in d:       self.exclude = d["exclude"]
             if "auto_resume" in d:   self.auto_resume = bool(d["auto_resume"])
             if "resume_delay" in d:  self.resume_delay = max(0.0, min(60.0, float(d["resume_delay"])))
+            if "arm_on_boot" in d:   self.arm_on_boot = bool(d["arm_on_boot"])
             if any(k in d for k in ("trip_y", "danger_below", "exclude")):
                 self._ref = None     # geometry changed -> recapture reference
         self._save()
@@ -320,6 +322,7 @@ class SafetyMonitor:
             "trip_y": self.trip_y, "danger_below": self.danger_below,
             "min_area_frac": self.min_area_frac, "exclude": self.exclude,
             "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
+            "arm_on_boot": self.arm_on_boot,
             "fg": round(self.fg_frac, 4), "cv": cv2 is not None,
         }
 
@@ -329,6 +332,7 @@ class SafetyMonitor:
                 "trip_y": self.trip_y, "danger_below": self.danger_below,
                 "min_area_frac": self.min_area_frac, "exclude": self.exclude,
                 "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
+                "arm_on_boot": self.arm_on_boot,
             }, indent=2))
         except Exception as e:
             print(f"Safety config save error: {e}")
@@ -343,6 +347,7 @@ class SafetyMonitor:
                 self.exclude = d.get("exclude", self.exclude)
                 self.auto_resume = d.get("auto_resume", self.auto_resume)
                 self.resume_delay = d.get("resume_delay", self.resume_delay)
+                self.arm_on_boot = d.get("arm_on_boot", self.arm_on_boot)
         except Exception as e:
             print(f"Safety config load error: {e}")
 
@@ -1161,6 +1166,11 @@ async def main():
     # 820×616 = exactly half of the 1640×1232 binned full-FOV mode — same 4:3
     # framing (no extra crop), ~4× fewer pixels to MJPEG-encode than full res.
     camera_mgr.start(width=820, height=616)
+
+    # Auto-arm safety once the camera has warmed up (scene assumed clear at boot)
+    if safety.arm_on_boot:
+        threading.Timer(6.0, safety.arm).start()
+        print("Safety: auto-arming in 6s")
 
     httpd = ThreadedHTTPServer(("0.0.0.0", HTTP_PORT), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()

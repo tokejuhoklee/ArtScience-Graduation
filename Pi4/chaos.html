@@ -93,6 +93,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
 
 <header>
   <span class="title">Whip — Chaos</span>
+  <span id="tl-now" style="display:none;font-size:10px;color:#9c7cff;letter-spacing:.05em"></span>
   <span id="badge" class="badge">running</span>
   <span id="dot-serial" class="dot" title="serial"></span>
   <span id="dot-ws" class="dot" title="ws"></span>
@@ -395,6 +396,10 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
         <div class="btn" onclick="disarmSafety()">Disarm</div>
         <div class="btn stop" onclick="rearmSafety()">↺ Re-arm</div>
       </div>
+      <div class="tog-row" style="margin-top:8px">
+        <span>Arm automatically on boot</span>
+        <div class="tog on" id="tog-armboot" onclick="this.classList.toggle('on'); pushSafetyConfig()"></div>
+      </div>
       <div id="saf-cv-warn" style="display:none;font-size:9px;color:#fc6c6c;margin-top:4px">
         OpenCV not available on the Pi4 — detection cannot run.
       </div>
@@ -494,6 +499,8 @@ let timeline = [];         // [{presetName, duration}]
 const PRESETS_KEY = 'whip_presets';
 const TIMELINE_KEY = 'whip_timeline';
 const LOOP_KEY = 'whip_loop';
+const TL_SESSION_KEY = 'whip_tl_t0';   // active timeline start (ms) — survives refresh
+let tlRestored = false;                // have we tried to restore a timeline session?
 
 // Save to localStorage (instant, offline) and mirror to the Pi4 (cross-device,
 // survives cache clears). Server is treated as the shared source of truth.
@@ -766,6 +773,18 @@ function connectWS() {
           ge('badge').classList.toggle('on', running);
           if (d.osc.running && d.osc.angle !== undefined) {
             updatePosBar(d.osc.angle);
+          }
+          // Resume a timeline that was playing before a page refresh, so the
+          // active-step indicator keeps tracking (and the server keeps morphing).
+          if (!tlRestored) {
+            tlRestored = true;
+            let t0 = 0;
+            try { t0 = +localStorage.getItem(TL_SESSION_KEY); } catch {}
+            if (t0 && d.osc.running && timeline.length) {
+              runT0 = t0; activeTimeline = true; startTimelinePush();
+            } else {
+              try { localStorage.removeItem(TL_SESSION_KEY); } catch {}
+            }
           }
         }
         if (d.safety !== undefined) applySafetyState(d.safety, false);
@@ -1284,28 +1303,37 @@ function applyTimelineFrame() {
   const tl = getTimelineParams(elapsed);
   if (!tl) return;
 
-  mode = (tl.mode === 'sine') ? 'sine' : 'chaos';   // canvas follows the segment
-  if (mode === 'sine') {
-    setSliderVal('s1a', tl.s1a); setSliderVal('s1f', tl.s1f); setSliderVal('s1p', tl.s1p);
-    setSliderVal('s2a', tl.s2a); setSliderVal('s2f', tl.s2f); setSliderVal('s2p', tl.s2p);
-  } else {
-    setSliderVal('cscale', tl.cscale); setSliderVal('csim', tl.csim);
-    setSliderVal('cL1', tl.cL1); setSliderVal('cL2', tl.cL2);
-    setSliderVal('cm1', tl.cm1); setSliderVal('cm2', tl.cm2);
-    setSliderVal('cdamp', tl.cdamp);
-    if (chaosDP) {           // morph the live sim's physics continuously
-      chaosDP.L1 = tl.cL1; chaosDP.L2 = tl.cL2;
-      chaosDP.m1 = tl.cm1; chaosDP.m2 = tl.cm2;
-      chaosDP.damping = tl.cdamp;
+  // Only drive the on-screen sliders/canvas when actually viewing the Timeline
+  // tab — otherwise leave them alone so you can edit presets while it plays.
+  if (tab === 'timeline') {
+    mode = (tl.mode === 'sine') ? 'sine' : 'chaos';   // canvas follows the segment
+    if (mode === 'sine') {
+      setSliderVal('s1a', tl.s1a); setSliderVal('s1f', tl.s1f); setSliderVal('s1p', tl.s1p);
+      setSliderVal('s2a', tl.s2a); setSliderVal('s2f', tl.s2f); setSliderVal('s2p', tl.s2p);
+    } else {
+      setSliderVal('cscale', tl.cscale); setSliderVal('csim', tl.csim);
+      setSliderVal('cL1', tl.cL1); setSliderVal('cL2', tl.cL2);
+      setSliderVal('cm1', tl.cm1); setSliderVal('cm2', tl.cm2);
+      setSliderVal('cdamp', tl.cdamp);
+      if (chaosDP) {           // morph the live sim's physics continuously
+        chaosDP.L1 = tl.cL1; chaosDP.L2 = tl.cL2;
+        chaosDP.m1 = tl.cm1; chaosDP.m2 = tl.cm2;
+        chaosDP.damping = tl.cdamp;
+      }
     }
   }
 
-  const idx = timelineActiveIndex(elapsed);   // highlight the current step
+  // Always track the active step — highlight in the list + a header indicator
+  // visible on every tab, so you know where you are while editing presets.
+  const idx = timelineActiveIndex(elapsed);
   if (idx !== _tlActiveIdx) {
     _tlActiveIdx = idx;
     const items = ge('timeline-list').children;
     for (let i = 0; i < items.length; i++)
       if (items[i].classList) items[i].classList.toggle('active', i === idx);
+    const now = ge('tl-now');
+    now.textContent = `▶ ${timeline[idx].presetName} (${idx+1}/${timeline.length})`;
+    now.style.display = '';
   }
 }
 
@@ -1478,18 +1506,23 @@ async function doRun() {
     });
   } catch(e){ console.warn(e); }
 
-  // Timeline morphs params over time — push interpolated values to the server
-  // continuously (slider-driven scheduleUpdate doesn't fire during playback).
+  startTimelinePush();
+  if (activeTimeline) localStorage.setItem(TL_SESSION_KEY, String(runT0));  // survive refresh
+}
+
+// Push interpolated timeline params to the server every tick (slider-driven
+// scheduleUpdate doesn't fire during playback). Factored out so a page reload
+// can resume an in-progress timeline.
+function startTimelinePush() {
   clearInterval(tlTimer);
-  if (activeTimeline) {
-    tlTimer = setInterval(()=>{
-      if (!running || !activeTimeline || runT0 === null) return;
-      fetch(`${BASE}/api/osc/update`,{
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify(buildParams()), signal:AbortSignal.timeout(3000),
-      }).catch(()=>{});
-    }, TL_PUSH_MS);
-  }
+  if (!activeTimeline) return;
+  tlTimer = setInterval(()=>{
+    if (!running || !activeTimeline || runT0 === null) return;
+    fetch(`${BASE}/api/osc/update`,{
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(buildParams()), signal:AbortSignal.timeout(3000),
+    }).catch(()=>{});
+  }, TL_PUSH_MS);
 }
 
 async function doStop() {
@@ -1497,7 +1530,9 @@ async function doStop() {
   activeTimeline=false;
   clearInterval(tlTimer);
   _tlActiveIdx = -1;
+  try { localStorage.removeItem(TL_SESSION_KEY); } catch {}
   document.querySelectorAll('.timeline-item.active').forEach(el => el.classList.remove('active'));
+  ge('tl-now').style.display = 'none';
   try {
     await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
   } catch {}
@@ -1579,6 +1614,7 @@ function applySafetyState(s, full) {
     ge('saf-sens').value = s.min_area_frac;
     ge('saf-sens-v').textContent = (s.min_area_frac*100).toFixed(1) + '%';
     if (s.auto_resume !== undefined) ge('tog-resume').classList.toggle('on', s.auto_resume);
+    if (s.arm_on_boot !== undefined) ge('tog-armboot').classList.toggle('on', s.arm_on_boot);
     if (s.resume_delay !== undefined) {
       ge('saf-delay').value = s.resume_delay;
       ge('saf-delay-v').textContent = (+s.resume_delay).toFixed(1) + ' s';
@@ -1608,6 +1644,7 @@ function pushSafetyConfig() {
         min_area_frac: +ge('saf-sens').value,
         auto_resume: ge('tog-resume').classList.contains('on'),
         resume_delay: +ge('saf-delay').value,
+        arm_on_boot: ge('tog-armboot').classList.contains('on'),
       }), signal:AbortSignal.timeout(3000),
     }).catch(()=>{});
   }, 200);
