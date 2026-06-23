@@ -75,6 +75,21 @@ volatile long initialStepsScheduled = 0;
 int startupRampSteps = 150;
 bool enableSoftStart = true;
 
+// Boot gravity-home: stay de-energized so the arm falls to its hanging rest,
+// then treat that point as 0. Non-blocking (see loop()); incoming commands are
+// discarded until settled so a queued on/move can't fire early and skew the zero.
+const unsigned long BOOT_SETTLE_MS = 8000;   // tune to how long the arm takes to still
+bool booting = true;
+unsigned long bootStart = 0;
+
+// Idle re-home: after this long with no activity (and no motion), drop to
+// gravity rest and re-zero, correcting drift between runs. Reuses the boot-home
+// settle path, but aborts if a command arrives so a Run isn't blocked.
+const unsigned long IDLE_REHOME_MS = 8000;
+unsigned long lastActivityMs = 0;
+bool idleHomed  = false;   // already re-homed since the last activity
+bool idleRehome = false;   // current settle is an idle re-home (abortable), not boot
+
 //
 // === UTILITIES ===
 //
@@ -239,9 +254,12 @@ void handleSerialCommands() {
         
         String cmd = serialBuffer;
         printLog("> " + cmd);
-        
+
+        lastActivityMs = millis();   // any command counts as activity
+        idleHomed = false;           // re-arm the idle re-home timer
+
         // Commands
-        if (cmd == "on") { 
+        if (cmd == "on") {
           setMotorEnabled(true); 
         }
         else if (cmd == "off") { 
@@ -428,14 +446,6 @@ void handleSerialCommands() {
 //
 // === SETUP ===
 //
-// Boot gravity-home: stay de-energized so the arm falls to its hanging rest,
-// then treat that point as 0. Non-blocking (see loop()) and incoming commands
-// are discarded until settled, so a queued on/move can't fire early and throw
-// the zero off — that was the bug in the first (blocking) version.
-const unsigned long BOOT_SETTLE_MS = 8000;   // tune to how long the arm takes to still
-bool booting = true;
-unsigned long bootStart = 0;
-
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -464,17 +474,36 @@ void setup() {
 // === LOOP ===
 //
 void loop() {
-  // Boot gravity-home: motor stays off so the arm settles to rest; discard any
-  // commands until BOOT_SETTLE_MS elapses, then zero there. Non-blocking.
+  // Gravity-home settle (boot or idle re-home): motor off so the arm falls to
+  // rest, then zero there. Boot-home discards commands; an idle re-home aborts
+  // if a command arrives so a Run isn't blocked.
   if (booting) {
-    while (Serial.available() > 0) Serial.read();   // drop queued commands
-    if (millis() - bootStart >= BOOT_SETTLE_MS) {
-      currentPosition = 0;
-      currentTarget   = 0;
-      appliedDir      = -1;
-      booting = false;
-      printLog("Boot home complete. Rest = 0. Type 'help' for commands.");
+    if (idleRehome && Serial.available() > 0) {
+      booting = false; idleRehome = false;   // command arrived — abort, run it
+      printLog("Idle re-home aborted (command received)");
+    } else {
+      while (Serial.available() > 0) Serial.read();   // drop queued commands
+      if (millis() - bootStart >= BOOT_SETTLE_MS) {
+        currentPosition = 0;
+        currentTarget   = 0;
+        appliedDir      = -1;
+        booting = false; idleRehome = false;
+        lastActivityMs  = millis();
+        idleHomed       = true;   // just homed; don't re-home until next activity
+        printLog("Home complete. Rest = 0.");
+      }
+      return;
     }
+  }
+
+  // Idle re-home: no activity and no motion for IDLE_REHOME_MS -> re-home once.
+  if (!idleHomed && stepsRemaining == 0 && (millis() - lastActivityMs > IDLE_REHOME_MS)) {
+    idleHomed  = true;
+    idleRehome = true;
+    setMotorEnabled(false);   // de-energize so gravity pulls the arm to rest
+    booting    = true;
+    bootStart  = millis();
+    printLog("Idle re-home: settling...");
     return;
   }
 
