@@ -24,3 +24,4 @@ Pi4/venv/
 
 # Runtime data (lives on the Pi4)
 Pi4/chaos_presets.json
+Pi4/safety_config.json

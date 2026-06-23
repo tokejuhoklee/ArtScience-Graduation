@@ -29,8 +29,11 @@ import websockets.legacy.server
 
 try:
     import cv2
+    import numpy as np
     CAMERA_AVAILABLE = True
 except ImportError:
+    cv2 = None
+    np = None
     CAMERA_AVAILABLE = False
     print("opencv-python-headless not installed — camera disabled")
 
@@ -78,6 +81,7 @@ class CameraManager:
     def __init__(self):
         self._proc   = None   # rpicam-vid subprocess
         self._cap    = None   # OpenCV VideoCapture (USB fallback)
+        self._picam  = None   # picamera2 instance
         self._frame  = None   # latest JPEG bytes
         self._lock   = threading.Lock()
         self.running = False
@@ -137,6 +141,11 @@ class CameraManager:
                         with self._lock:
                             self._frame = frame
                         buf = buf[end + 2:]
+                        if safety.armed and cv2 is not None and np is not None:
+                            gray = cv2.imdecode(np.frombuffer(frame, np.uint8),
+                                                cv2.IMREAD_GRAYSCALE)
+                            if gray is not None:
+                                safety.process(gray)
                 except Exception as e:
                     print(f"Camera read error: {e}")
                     break
@@ -153,6 +162,8 @@ class CameraManager:
                             time.sleep(0.05)
                             continue
                     frame = cv2.rotate(frame, cv2.ROTATE_180)
+                    if safety.armed:
+                        safety.process(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY))
                     _, buf = cv2.imencode(".jpg", frame, encode_params)
                     with self._lock:
                         self._frame = buf.tobytes()
@@ -172,6 +183,132 @@ class CameraManager:
             return self._frame
 
 camera_mgr = CameraManager()
+
+# ── Safety monitor (camera proximity cutoff) ──────────────────────────────────
+# Watches a "danger zone" (one side of a horizontal trip line) on the raw,
+# grayscale camera frame and stops the whip if anything intrudes. Static
+# reference differencing (captured at arm time) — conservative: a stationary
+# intruder stays detected (never absorbed). The whip's own arc is excluded via
+# an optional ignore box. Fail-safe: stale frame or detector error -> trip.
+SAFETY_CONFIG = Path(__file__).parent / "safety_config.json"
+
+class SafetyMonitor:
+    STALE_S = 1.0   # no fresh frame this long while armed -> trip
+
+    def __init__(self):
+        self.armed         = False
+        self.tripped       = False
+        self.trip_reason   = ""
+        self.trip_y        = 0.55    # trip line, fraction of frame height
+        self.danger_below  = True    # danger = below the line (toward bottom)
+        self.min_area_frac = 0.03    # foreground fraction of danger zone to trip
+        self.diff_thresh   = 25      # per-pixel grayscale diff threshold
+        self.exclude       = None    # whip ignore box [x0,y0,x1,y1] fractions, or None
+        self.fg_frac       = 0.0     # current foreground fraction (for UI tuning)
+        self.last_frame_t  = 0.0
+        self._ref          = None    # static reference of the empty danger zone
+        self._lock         = threading.Lock()
+        self._load()
+
+    def configure(self, d):
+        with self._lock:
+            if "trip_y" in d:        self.trip_y = max(0.05, min(0.95, float(d["trip_y"])))
+            if "danger_below" in d:  self.danger_below = bool(d["danger_below"])
+            if "min_area_frac" in d: self.min_area_frac = max(0.005, min(0.5, float(d["min_area_frac"])))
+            if "exclude" in d:       self.exclude = d["exclude"]
+            self._ref = None         # geometry changed -> recapture reference
+        self._save()
+
+    def arm(self):
+        with self._lock:
+            self._ref = None; self.tripped = False; self.trip_reason = ""
+            self.armed = True; self.last_frame_t = time.time()
+
+    def disarm(self):
+        with self._lock:
+            self.armed = False
+
+    def rearm(self):
+        with self._lock:
+            self._ref = None; self.tripped = False; self.trip_reason = ""
+            self.last_frame_t = time.time()
+
+    def _region(self, gray):
+        h, w = gray.shape[:2]
+        y = int(self.trip_y * h)
+        if self.danger_below: reg, y0 = gray[y:, :].copy(), y
+        else:                 reg, y0 = gray[:y, :].copy(), 0
+        if self.exclude:
+            ex0 = int(self.exclude[0]*w); ey0 = int(self.exclude[1]*h)
+            ex1 = int(self.exclude[2]*w); ey1 = int(self.exclude[3]*h)
+            reg[max(0, ey0-y0):max(0, ey1-y0), ex0:ex1] = 0  # blank whip arc
+        return reg
+
+    def process(self, gray):
+        if not self.armed or cv2 is None:
+            return
+        self.last_frame_t = time.time()
+        try:
+            small = cv2.GaussianBlur(cv2.resize(gray, (320, 240)), (21, 21), 0)
+            with self._lock:
+                reg = self._region(small)
+                if self._ref is None or self._ref.shape != reg.shape:
+                    self._ref = reg
+                    return
+                diff = cv2.absdiff(reg, self._ref)
+                thr, min_frac = self.diff_thresh, self.min_area_frac
+            mask = cv2.dilate(cv2.threshold(diff, thr, 255, cv2.THRESH_BINARY)[1], None, iterations=2)
+            self.fg_frac = cv2.countNonZero(mask) / max(1, reg.size)
+            if self.fg_frac > min_frac and not self.tripped:
+                self._trip("intrusion")
+        except Exception as e:
+            print(f"Safety process error: {e}")
+            self._trip("detector error")
+
+    def check_stale(self):
+        if self.armed and not self.tripped and cv2 is not None:
+            if time.time() - self.last_frame_t > self.STALE_S:
+                self._trip("no camera frame")
+
+    def _trip(self, reason):
+        self.tripped = True
+        self.trip_reason = reason
+        try:
+            osc_engine.stop()
+            serial_mgr.send("off")
+        except Exception as e:
+            print(f"Safety trip stop error: {e}")
+        print(f"!! SAFETY TRIP: {reason}")
+
+    def state(self):
+        return {
+            "armed": self.armed, "tripped": self.tripped, "reason": self.trip_reason,
+            "trip_y": self.trip_y, "danger_below": self.danger_below,
+            "min_area_frac": self.min_area_frac, "exclude": self.exclude,
+            "fg": round(self.fg_frac, 4), "cv": cv2 is not None,
+        }
+
+    def _save(self):
+        try:
+            SAFETY_CONFIG.write_text(json.dumps({
+                "trip_y": self.trip_y, "danger_below": self.danger_below,
+                "min_area_frac": self.min_area_frac, "exclude": self.exclude,
+            }, indent=2))
+        except Exception as e:
+            print(f"Safety config save error: {e}")
+
+    def _load(self):
+        try:
+            if SAFETY_CONFIG.exists():
+                d = json.loads(SAFETY_CONFIG.read_text())
+                self.trip_y = d.get("trip_y", self.trip_y)
+                self.danger_below = d.get("danger_below", self.danger_below)
+                self.min_area_frac = d.get("min_area_frac", self.min_area_frac)
+                self.exclude = d.get("exclude", self.exclude)
+        except Exception as e:
+            print(f"Safety config load error: {e}")
+
+safety = SafetyMonitor()
 
 # ── Serial Manager ────────────────────────────────────────────────────────────
 class SerialManager:
@@ -569,6 +706,7 @@ async def ws_handler(websocket):
 
 async def broadcast_loop():
     while True:
+        safety.check_stale()   # fail-safe: trip if the camera feed went stale
         lines = serial_mgr.read_available()
         msg = json.dumps({
             "lines": lines,
@@ -583,6 +721,7 @@ async def broadcast_loop():
                 "running": osc_engine.running,
                 "angle":   round(osc_engine.current_angle, 2),
             },
+            "safety": safety.state(),
             "serial": serial_mgr.connected,
         })
         dead = set()
@@ -807,6 +946,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(data)
             return
 
+        if path == "/api/safety":
+            self.send_json(safety.state())
+            return
+
         if path.startswith("/api/sequences/"):
             name = path.split("/api/sequences/")[1]
             f = SEQUENCES_DIR / f"{name}.json"
@@ -885,6 +1028,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/osc/stop":
             osc_engine.stop()
             self.send_json({"ok": True})
+            return
+
+        if path == "/api/safety/config":
+            safety.configure(data)
+            self.send_json({"ok": True, **safety.state()})
+            return
+        if path == "/api/safety/arm":
+            safety.arm()
+            self.send_json({"ok": True, **safety.state()})
+            return
+        if path == "/api/safety/disarm":
+            safety.disarm()
+            self.send_json({"ok": True})
+            return
+        if path == "/api/safety/rearm":
+            safety.rearm()
+            self.send_json({"ok": True, **safety.state()})
             return
 
         if path == "/api/home":
