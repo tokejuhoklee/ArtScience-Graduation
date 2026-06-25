@@ -455,6 +455,20 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     </div>
     <div style="font-size:9px;color:#4a4a6a;padding:2px 0 0">
       de-energizes so gravity pulls the arm to rest, then sets that point as 0°
+      — unreliable on the closed-loop drive; prefer jog-set below
+    </div>
+
+    <div style="font-size:9px;color:#9c7cff;padding:8px 0 3px 0;letter-spacing:.08em">SET CENTRE (JOG)</div>
+    <div style="display:grid;grid-template-columns:44px 1fr 44px;gap:6px;align-items:center">
+      <div class="btn" onclick="jog(-1)" style="padding:9px">◄</div>
+      <input type="number" id="jog-step" min="0.5" max="30" step="0.5" value="5" title="jog step (°)"
+        style="padding:6px;background:#04040a;border:1px solid #181828;border-radius:4px;
+        color:#c0c0e0;font-family:monospace;font-size:10px;text-align:center">
+      <div class="btn" onclick="jog(1)" style="padding:9px">►</div>
+    </div>
+    <div class="btn run" onclick="setCenterHere()" style="margin-top:6px;padding:9px">Set centre (0) here</div>
+    <div style="font-size:9px;color:#4a4a6a;padding:2px 0 0">
+      stop the run, jog the arm to true down, then Set 0 — holds across off/on
     </div>
   </div>
 
@@ -1614,6 +1628,22 @@ async function doHome() {
     btn.style.pointerEvents = ''; btn.style.opacity = '';
     motorAngle = 0;          // new zero — reflect it in the preview
   }, 1000);
+}
+
+// Jog the arm (energized) by ±step degrees — moves the driver's own reference
+// via real pulses, so it's deterministic and persists across off/on.
+function jog(dir) {
+  const deg = +ge('jog-step').value || 5;
+  const steps = Math.round(dir * deg * GEAR / 360 * PPR);
+  fetch(`${BASE}/api/cmd?c=offset%20${steps}`, {signal:AbortSignal.timeout(3000)}).catch(()=>{});
+}
+
+// Lock the current (jogged) position as zero. Calibrating while the arm is AT
+// the driver's commanded position keeps Pico and driver in sync — unlike the
+// gravity re-zero, this stays put when de-energized.
+function setCenterHere() {
+  fetch(`${BASE}/api/cmd?c=calibrate`, {signal:AbortSignal.timeout(3000)}).catch(()=>{});
+  motorAngle = 0;
 }
 
 function scheduleUpdate() {
