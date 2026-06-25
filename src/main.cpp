@@ -82,14 +82,6 @@ const unsigned long BOOT_SETTLE_MS = 8000;   // tune to how long the arm takes t
 bool booting = true;
 unsigned long bootStart = 0;
 
-// Idle re-home: after this long with no activity (and no motion), drop to
-// gravity rest and re-zero, correcting drift between runs. Reuses the boot-home
-// settle path, but aborts if a command arrives so a Run isn't blocked.
-const unsigned long IDLE_REHOME_MS = 8000;
-unsigned long lastActivityMs = 0;
-bool idleHomed  = false;   // already re-homed since the last activity
-bool idleRehome = false;   // current settle is an idle re-home (abortable), not boot
-
 //
 // === UTILITIES ===
 //
@@ -254,9 +246,6 @@ void handleSerialCommands() {
         
         String cmd = serialBuffer;
         printLog("> " + cmd);
-
-        lastActivityMs = millis();   // any command counts as activity
-        idleHomed = false;           // re-arm the idle re-home timer
 
         // Commands
         if (cmd == "on") {
@@ -474,36 +463,20 @@ void setup() {
 // === LOOP ===
 //
 void loop() {
-  // Gravity-home settle (boot or idle re-home): motor off so the arm falls to
-  // rest, then zero there. Boot-home discards commands; an idle re-home aborts
-  // if a command arrives so a Run isn't blocked.
+  // Boot gravity-home: motor off so the arm falls to rest, then zero there.
+  // Only at power-on — the closed-loop driver and the Pico agree at that point.
+  // (No idle re-home: de-energizing mid-session makes the closed-loop driver
+  //  snap the arm back to its last commanded position on re-enable, which
+  //  diverges from the Pico's zero. Boot is the one safe time to home.)
   if (booting) {
-    if (idleRehome && Serial.available() > 0) {
-      booting = false; idleRehome = false;   // command arrived — abort, run it
-      printLog("Idle re-home aborted (command received)");
-    } else {
-      while (Serial.available() > 0) Serial.read();   // drop queued commands
-      if (millis() - bootStart >= BOOT_SETTLE_MS) {
-        currentPosition = 0;
-        currentTarget   = 0;
-        appliedDir      = -1;
-        booting = false; idleRehome = false;
-        lastActivityMs  = millis();
-        idleHomed       = true;   // just homed; don't re-home until next activity
-        printLog("Home complete. Rest = 0.");
-      }
-      return;
+    while (Serial.available() > 0) Serial.read();   // drop queued commands
+    if (millis() - bootStart >= BOOT_SETTLE_MS) {
+      currentPosition = 0;
+      currentTarget   = 0;
+      appliedDir      = -1;
+      booting = false;
+      printLog("Boot home complete. Rest = 0.");
     }
-  }
-
-  // Idle re-home: no activity and no motion for IDLE_REHOME_MS -> re-home once.
-  if (!idleHomed && stepsRemaining == 0 && (millis() - lastActivityMs > IDLE_REHOME_MS)) {
-    idleHomed  = true;
-    idleRehome = true;
-    setMotorEnabled(false);   // de-energize so gravity pulls the arm to rest
-    booting    = true;
-    bootStart  = millis();
-    printLog("Idle re-home: settling...");
     return;
   }
 
