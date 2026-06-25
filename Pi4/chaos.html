@@ -425,6 +425,14 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
       hard travel cap — keep below physical stop clearance
     </div>
     <div class="prow">
+      <span class="plabel">Center</span>
+      <input type="range" id="mcenter" min="-45" max="45" step="0.5" value="0">
+      <span class="pval" id="mcenter-v">0.0°</span>
+    </div>
+    <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px">
+      shifts the swing centre — dial out any left/right tilt from the zero
+    </div>
+    <div class="prow">
       <span class="plabel">Max spd</span>
       <input type="range" id="mspd" min="200" max="3000" step="50" value="2000">
       <span class="pval" id="mspd-v">2000 sps</span>
@@ -502,6 +510,7 @@ let timeline = [];         // [{presetName, duration}]
 const PRESETS_KEY = 'whip_presets';
 const TIMELINE_KEY = 'whip_timeline';
 const LOOP_KEY = 'whip_loop';
+const CENTER_KEY = 'whip_center';   // zero-offset calibration, persists across reloads
 const TL_SESSION_KEY = 'whip_tl_t0';   // active timeline start (ms) — survives refresh
 let tlRestored = false;                // have we tried to restore a timeline session?
 let _pendingReseed = false;            // re-seed the server's chaos ICs on next push
@@ -930,7 +939,7 @@ function drawSine(W, H, dt) {
     oscPhase1 += TAU * (+ge('s1f').value) * dt;
     oscPhase2 += TAU * (+ge('s2f').value) * dt;
   }
-  const cur = sineWave(0)*envVal(t);
+  const cur = sineWave(0)*envVal(t) + motorCenter();
   const clampedCur = limitActive ? Math.max(-lim, Math.min(lim, cur)) : cur;
   const isClamped  = limitActive && Math.abs(cur) > lim;
   const motorNow   = slewMotor(clampedCur, dt);          // speed-limited actual position
@@ -1088,7 +1097,7 @@ function drawChaos(W, H, dt) {
   const split  = W*0.56;
   const {th1,th2,w1,L1,L2} = chaosDP;
   const scale  = +ge('cscale').value;
-  const rawDeg = th1*180/Math.PI*scale;
+  const rawDeg = th1*180/Math.PI*scale + motorCenter();
   const motorDeg = limitActive ? Math.max(-lim, Math.min(lim, rawDeg)) : rawDeg;
   const clamped  = Math.abs(rawDeg) > lim;
   const motorNow = slewMotor(motorDeg, dt);   // speed-limited actual position
@@ -1371,6 +1380,7 @@ const SLIDERS = [
   ['env-h',v=>v+' s'],
   ['env-d',v=>(+v).toFixed(1)+' s'],
   ['mlimit',v=>v+'°'],
+  ['mcenter',v=>(+v).toFixed(1)+'°'],
   ['mspd', v=>v+' sps'],
   ['cL1',  v=>(+v).toFixed(2)+' m'],
   ['cL2',  v=>(+v).toFixed(2)+' m'],
@@ -1396,10 +1406,17 @@ function bindSliders() {
 
       // Amplitude ceilings depend on motor limit, max speed, and osc frequency
       if(id==='mlimit' || id==='mspd' || id==='s1f' || id==='s2f') refreshAmpLimits();
+      if(id==='mcenter') { try { localStorage.setItem(CENTER_KEY, el.value); } catch {} }
       scheduleUpdate();
     });
   });
   ge('tog-reset').addEventListener('click', ()=>ge('tog-reset').classList.toggle('on'));
+
+  // Restore the persisted centre calibration
+  try {
+    const c = localStorage.getItem(CENTER_KEY);
+    if (c !== null) { ge('mcenter').value = c; ge('mcenter-v').textContent = (+c).toFixed(1)+'°'; }
+  } catch {}
 
   refreshAmpLimits();   // initial amplitude ceilings
 }
@@ -1421,6 +1438,7 @@ function updateLimitState() {
 
 // ── API ────────────────────────────────────────────────────────────────────
 function motorLimit() { return +ge('mlimit').value; }
+function motorCenter(){ return +ge('mcenter').value; }   // zero-offset calibration
 function maxSps()     { return +ge('mspd').value; }
 function armVelCap()  { return maxSps() * DEG_PER_STEP; }   // arm deg/s ceiling
 
@@ -1462,6 +1480,7 @@ function updateSpeedClamp() {
 function buildParams() {
   const limit = limitActive ? motorLimit() : 105;
   const speed = +ge('mspd').value;
+  const center = motorCenter();   // zero-offset calibration, applied to all modes
 
   // Timeline overrides everything when active
   if (activeTimeline && timeline.length > 0 && runT0 !== null) {
@@ -1474,7 +1493,7 @@ function buildParams() {
           osc1:{amp: tl.s1a??80, freq: tl.s1f??0.4, phase: tl.s1p??0},
           osc2:{amp: tl.s2a??25, freq: tl.s2f??1.1, phase: tl.s2p??90},
           envelope: (tl.freerun !== false) ? null : {attack: tl.envA??8, hold: tl.envH??30, decay: tl.envD??10},
-          limit, speed,
+          limit, speed, center,
         };
       }
       const reseed = _pendingReseed; _pendingReseed = false;
@@ -1483,7 +1502,7 @@ function buildParams() {
         L1: tl.cL1??1, L2: tl.cL2??0.8, m1: tl.cm1??1, m2: tl.cm2??0.8,
         th1: tl.cth1??130, th2: tl.cth2??95, w1: tl.cw1??0,
         damping: tl.cdamp??0.01, scale: tl.cscale??0.58, simSpeed: tl.csim??1,
-        limit, speed, reseed,
+        limit, speed, reseed, center,
       };
     }
   }
@@ -1496,12 +1515,12 @@ function buildParams() {
       envelope: freerun ? null : {
         attack:+ge('env-a').value, hold:+ge('env-h').value, decay:+ge('env-d').value
       },
-      limit, speed,
+      limit, speed, center,
     };
   }
 
   return {
-    mode:'chaos',
+    mode:"chaos",
     L1:+ge('cL1').value,  L2:+ge('cL2').value,
     m1:+ge('cm1').value,  m2:+ge('cm2').value,
     th1:+ge('cth1').value, th2:+ge('cth2').value,
@@ -1509,7 +1528,7 @@ function buildParams() {
     damping:+ge('cdamp').value,
     scale:+ge('cscale').value,
     simSpeed:+ge('csim').value,
-    limit, speed,
+    limit, speed, center,
   };
 }
 

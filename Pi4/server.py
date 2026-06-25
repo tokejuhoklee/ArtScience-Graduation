@@ -675,6 +675,7 @@ class OscillatorEngine:
                 mode = p.get('mode', init_mode)
                 lim  = max(10, min(105, int(p.get('limit', 90))))
 
+                center = p.get('center', 0.0)   # zero-offset calibration (degrees)
                 if mode == 'chaos':
                     if dp is None or self._reseed:   # seed / re-seed ICs (segment restart)
                         dp = _make_dp(p)
@@ -685,12 +686,12 @@ class OscillatorEngine:
                     for _ in range(steps_needed):
                         dp.step(self.SIM_DT)
                     scale = p.get('scale', 0.58)
-                    angle = max(-lim, min(lim, math.degrees(dp.th1) * scale))
+                    angle = max(-lim, min(lim, math.degrees(dp.th1) * scale + center))
                 else:  # sine — accumulate phase so freq changes don't jump position
                     o1 = p.get('osc1', {}); o2 = p.get('osc2', {})
                     phase1 += 2*math.pi * o1.get('freq', 0.4) * dt_real
                     phase2 += 2*math.pi * o2.get('freq', 1.1) * dt_real
-                    angle = max(-lim, min(lim, self._sine(phase1, phase2, t, p)))
+                    angle = max(-lim, min(lim, self._sine(phase1, phase2, t, p) + center))
 
                 self.current_angle = angle
                 steps = int(angle * GEAR_RATIO / 360.0 * PULSES_PER_REV)
