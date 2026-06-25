@@ -602,6 +602,7 @@ class OscillatorEngine:
         self.params       = {}
         self._gen         = 0
         self._task        = None
+        self._reseed      = False   # recreate the chaos sim from current ICs
 
     def start(self, params: dict, event_loop):
         self._gen += 1
@@ -611,12 +612,15 @@ class OscillatorEngine:
         engine.stop()              # silence sequence engine if running
         serial_mgr.flush_and_stop()
         time.sleep(0.12)
+        self._reseed = False
         self.params = params.copy()
         self._task = asyncio.run_coroutine_threadsafe(
             self._run(params, gen), event_loop
         )
 
     def update(self, params: dict):
+        if params.get("reseed"):
+            self._reseed = True   # chaos segment (re)started — re-seed ICs
         self.params.update(params)
 
     def stop(self):
@@ -672,8 +676,9 @@ class OscillatorEngine:
                 lim  = max(10, min(105, int(p.get('limit', 90))))
 
                 if mode == 'chaos':
-                    if dp is None:               # entered chaos mid-run — seed now
+                    if dp is None or self._reseed:   # seed / re-seed ICs (segment restart)
                         dp = _make_dp(p)
+                        self._reseed = False
                     dp.damping   = p.get('damping', 0.01)
                     sim_speed    = p.get('simSpeed', 1.0)
                     steps_needed = max(1, round(DT * sim_speed / self.SIM_DT))

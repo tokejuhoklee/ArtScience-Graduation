@@ -75,15 +75,18 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
   color:#c0c0e0;cursor:pointer;font-size:9px;flex-shrink:0}
 .preset-btn:hover{background:#2a2a42}
 
-.timeline-item{display:grid;grid-template-columns:1fr 46px 64px 32px;gap:6px;padding:8px;
+.timeline-item{display:grid;grid-template-columns:1fr 40px 54px 20px 20px 20px;gap:4px;padding:7px;
   background:#04040a;border:1px solid #1c1c30;border-radius:5px;align-items:center;font-size:10px}
 .timeline-preset{color:#9c7cff;text-overflow:ellipsis;overflow:hidden;white-space:nowrap;
   cursor:pointer}
 .timeline-preset:hover{text-decoration:underline}
-.tl-dur,.tl-ease{padding:4px 5px;background:#181828;border:1px solid #2a2a42;border-radius:3px;
+.tl-dur,.tl-ease{padding:4px 3px;background:#181828;border:1px solid #2a2a42;border-radius:3px;
   color:#c0c0e0;font-size:9px;font-family:monospace;width:100%}
 .tl-dur{text-align:center}
-.timeline-del{padding:4px 6px;background:#6c2c2c;border:1px solid #8c4c4c;border-radius:3px;
+.tl-move{padding:4px 0;background:#181828;border:1px solid #2a2a42;border-radius:3px;
+  color:#9c9cc0;cursor:pointer;font-size:9px;text-align:center}
+.tl-move:hover{background:#2a2a42}
+.timeline-del{padding:4px 0;background:#6c2c2c;border:1px solid #8c4c4c;border-radius:3px;
   color:#ec6c6c;cursor:pointer;font-size:9px;text-align:center}
 .timeline-del:hover{background:#8c4c4c}
 .timeline-item.active{border-color:#7c5cfc;background:#0f0a1e;box-shadow:0 0 6px rgba(124,92,252,.35)}
@@ -501,6 +504,7 @@ const TIMELINE_KEY = 'whip_timeline';
 const LOOP_KEY = 'whip_loop';
 const TL_SESSION_KEY = 'whip_tl_t0';   // active timeline start (ms) — survives refresh
 let tlRestored = false;                // have we tried to restore a timeline session?
+let _pendingReseed = false;            // re-seed the server's chaos ICs on next push
 
 // Save to localStorage (instant, offline) and mirror to the Pi4 (cross-device,
 // survives cache clears). Server is treated as the shared source of truth.
@@ -728,7 +732,9 @@ function updateTimelineUI() {
       <input class="tl-dur" type="number" min="0.5" max="60" step="0.5" value="${t.duration}"
         onchange="editTimelineDuration(${i}, this.value)" title="transition seconds">
       <select class="tl-ease" onchange="editTimelineEasing(${i}, this.value)" title="easing">${opts}</select>
-      <div class="timeline-del" onclick="removeFromTimeline(${i})">✕</div>
+      <div class="tl-move" onclick="moveTimelineItem(${i},-1)" title="move up">▲</div>
+      <div class="tl-move" onclick="moveTimelineItem(${i},1)" title="move down">▼</div>
+      <div class="timeline-del" onclick="removeFromTimeline(${i})" title="remove">✕</div>
     </div>`;
   }).join('');
   if (timeline.length === 0) list.innerHTML = '<div style="color:#4a4a6a;font-size:9px;padding:8px">No timeline items yet</div>';
@@ -747,6 +753,14 @@ function editTimelineDuration(i, val) {
 function editTimelineEasing(i, val) {
   timeline[i].easing = val;
   persist();
+}
+
+function moveTimelineItem(i, dir) {
+  const j = i + dir;
+  if (j < 0 || j >= timeline.length) return;
+  [timeline[i], timeline[j]] = [timeline[j], timeline[i]];
+  persist();
+  updateTimelineUI();
 }
 
 async function playTimeline() {
@@ -1334,6 +1348,15 @@ function applyTimelineFrame() {
     const now = ge('tl-now');
     now.textContent = `▶ ${timeline[idx].presetName} (${idx+1}/${timeline.length})`;
     now.style.display = '';
+
+    // Entering a chaos segment: re-seed its initial conditions so it starts
+    // with full energy again (otherwise damping makes it taper over loops).
+    const p = presets[timeline[idx].presetName];
+    if (p && p.mode !== 'sine') {
+      chaosDP = new DP(p.cL1, p.cL2, p.cm1, p.cm2, p.cth1, p.cth2, p.cw1, p.cdamp);
+      bob2Trail = []; phaseTrail = [];
+      _pendingReseed = true;   // tell the server to re-seed its sim too
+    }
   }
 }
 
@@ -1454,12 +1477,13 @@ function buildParams() {
           limit, speed,
         };
       }
+      const reseed = _pendingReseed; _pendingReseed = false;
       return {
         mode:'chaos',
         L1: tl.cL1??1, L2: tl.cL2??0.8, m1: tl.cm1??1, m2: tl.cm2??0.8,
         th1: tl.cth1??130, th2: tl.cth2??95, w1: tl.cw1??0,
         damping: tl.cdamp??0.01, scale: tl.cscale??0.58, simSpeed: tl.csim??1,
-        limit, speed,
+        limit, speed, reseed,
       };
     }
   }
