@@ -298,8 +298,11 @@ class SafetyMonitor:
         try:
             self._was_running  = osc_engine.running
             self._resume_params = dict(osc_engine.params) if osc_engine.params else None
+            # Hold (energized), don't de-energize: an off/on cycle decouples the
+            # closed-loop driver's reference from the Pico's and can shift the
+            # swing into the pillar. osc_engine.stop() halts motion but the motor
+            # keeps holding position, so the zero stays valid through a trip.
             osc_engine.stop()
-            serial_mgr.send("off")
         except Exception as e:
             print(f"Safety trip stop error: {e}")
         print(f"!! SAFETY TRIP: {reason}")

@@ -17,8 +17,13 @@ const uint8_t STEP_PIN   = 2;   // PUL+ -> GP2
 const uint8_t DIR_PIN    = 3;   // DIR+ -> GP3
 const int8_t  ENABLE_PIN = 4;   // ENA+ -> GP4
 const uint8_t PEND_PIN   = 5;   // PEND+ -> GP5 (input) ; PEND- -> GND
+const uint8_t ALM_PIN    = 6;   // ALM+ -> GP6  *** VERIFY this matches your wiring ***
 
 const bool ENABLE_ACTIVE_HIGH = false;  // JSS57 usually active-LOW
+// Driver alarm (open-collector). With INPUT_PULLUP the line idles HIGH; the
+// driver pulls it LOW when it alarms (position error / overload). If an
+// unconnected GP6 this just reads "no alarm", so it's safe by default.
+const bool ALM_ACTIVE_LOW = true;
 
 //
 // === MOTOR / MOTION DEFAULTS ===
@@ -82,12 +87,29 @@ const unsigned long BOOT_SETTLE_MS = 8000;   // tune to how long the arm takes t
 bool booting = true;
 unsigned long bootStart = 0;
 
+// Driver-alarm auto-stop: if the drive faults (e.g. arm stalled against the
+// pillar), halt immediately so it can't keep pushing.
+bool alarmLatched = false;
+
+// Stall homing — drives gently into a fixed stop to get an ABSOLUTE reference.
+// *** VERIFY at the studio before trusting: ALM_PIN above, HOME_DIR, and that
+// the stop you home into is the SAFE end, not the pillar. ***
+const int  HOME_DIR        = -1;   // -1 = negative/left direction. CONFIRM with a jog first.
+const int  HOME_SPEED      = 150;  // sps — slow & gentle so the touch is soft
+const long HOME_MAX_DEG    = 200;  // give up after this much arm travel (bound, safety)
+const long HOME_STOP_ANGLE = 105;  // arm angle of the stop in down=0 coords (abs value)
+const long HOME_BACKOFF_DEG= 5;    // back off this far off the stop after homing
+
 //
 // === UTILITIES ===
 //
 void printLog(const String &m) {
   if (quietMode) return;
   Serial.println(m);
+}
+
+bool almActive() {
+  return digitalRead(ALM_PIN) == (ALM_ACTIVE_LOW ? LOW : HIGH);
 }
 
 void updateGearReduction() {
@@ -176,6 +198,52 @@ void emergencyStop() {
   stepsRemaining = 0;
   interrupts();
   printLog("EMERGENCY STOP");
+}
+
+// Stall homing: drive gently toward a fixed stop until the driver alarms, then
+// treat that stop as a known absolute position. Gives a repeatable reference
+// that survives power-off — re-run it after any cooldown. EXPERIMENTAL: verify
+// ALM_PIN, ALM polarity, and HOME_DIR (jog test) before relying on it.
+void stallHome() {
+  emergencyStop();
+  noInterrupts(); stepsRemaining = 0; interrupts();
+  setMotorEnabled(true);
+  delay(50);
+
+  digitalWrite(DIR_PIN, (HOME_DIR < 0) ? HIGH : LOW);   // verify against your wiring
+  appliedDir = (HOME_DIR < 0) ? 1 : 0;
+  delayMicroseconds(DIR_SETUP_US);
+
+  const long maxSteps  = armAngleToMotorSteps(HOME_MAX_DEG);
+  const unsigned long stepInt = speedToIntervalMicros(HOME_SPEED);
+  bool hit = false;
+
+  printLog("Stall homing...");
+  for (long i = 0; i < maxSteps; i++) {
+    if (almActive()) { hit = true; break; }
+    if (Serial.available() > 0) { printLog("Stall home aborted (command)"); return; }
+    digitalWrite(STEP_PIN, HIGH);
+    delayMicroseconds(STEP_PULSE_WIDTH_US);
+    digitalWrite(STEP_PIN, LOW);
+    currentPosition += (HOME_DIR < 0) ? -1 : 1;
+    delayMicroseconds(stepInt - STEP_PULSE_WIDTH_US);
+  }
+
+  if (!hit) {
+    printLog("Stall home: no stop detected — check ALM_PIN / polarity / HOME_DIR");
+    return;
+  }
+
+  // At the stop: define this point as the known reference.
+  const long stopSteps = armAngleToMotorSteps(HOME_STOP_ANGLE);
+  currentPosition = (HOME_DIR < 0) ? -stopSteps : stopSteps;
+  currentTarget   = currentPosition;
+  appliedDir      = -1;
+  printLog("Stall home: stop at " + String(currentPosition) + " steps. Reference set.");
+
+  // Ease off the stop so we're not parked in the alarm.
+  long backoff = armAngleToMotorSteps(HOME_BACKOFF_DEG);
+  smartMoveTo(currentPosition + ((HOME_DIR < 0) ? backoff : -backoff));
 }
 
 //
@@ -398,6 +466,12 @@ void handleSerialCommands() {
           currentTarget -= shift;
           printLog("Calibrated. Current = 0");
         }
+        else if (cmd == "stallhome") {
+          stallHome();
+        }
+        else if (cmd == "alm") {
+          printLog(String("ALM: ") + (almActive() ? "ALARM" : "ok"));
+        }
         else if (cmd == "status") {
           printLog("=== STATUS ===");
           printLog("Position: " + String(currentPosition));
@@ -407,6 +481,7 @@ void handleSerialCommands() {
           printLog("Speed: " + String(currentSpeed) + " sps");
           printLog("Angle: " + String(currentAngle) + "°");
           printLog("Gear: " + String(drivingTeeth) + ":" + String(drivenTeeth));
+          printLog("ALM: " + String(almActive() ? "ALARM" : "ok"));
         }
         else if (cmd == "help") {
           printLog("=== COMMANDS ===");
@@ -447,6 +522,7 @@ void setup() {
     digitalWrite(ENABLE_PIN, ENABLE_ACTIVE_HIGH ? LOW : HIGH);
   }
   pinMode(PEND_PIN, INPUT_PULLUP);
+  pinMode(ALM_PIN, INPUT_PULLUP);
 
   updateGearReduction();
   updateMoveRangeFromAngle();
@@ -478,6 +554,21 @@ void loop() {
       printLog("Boot home complete. Rest = 0.");
     }
     return;
+  }
+
+  // Driver alarm auto-stop: halt the instant the drive faults (e.g. arm
+  // stalled against the pillar) so it can't keep pushing. Edge-detected.
+  if (motorEnabled && almActive()) {
+    if (!alarmLatched) {
+      alarmLatched = true;
+      emergencyStop();
+      continuousMode = false;
+      pendulumMode = false;
+      printLog("!! DRIVER ALARM — motion stopped");
+    }
+  } else if (alarmLatched && !almActive()) {
+    alarmLatched = false;
+    printLog("Driver alarm cleared");
   }
 
   // Call stepperTick as fast as possible for smooth stepping
