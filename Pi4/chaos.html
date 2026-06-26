@@ -418,7 +418,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     </div>
     <div class="prow">
       <span class="plabel">Limit</span>
-      <input type="range" id="mlimit" min="10" max="105" step="1" value="90">
+      <input type="range" id="mlimit" min="10" max="180" step="1" value="90">
       <span class="pval" id="mlimit-v">90°</span>
     </div>
     <div style="font-size:9px;color:#4a4a6a;padding:0 0 3px 52px" id="limit-note">
@@ -480,7 +480,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     <div class="pos-track">
       <div class="pos-thumb" id="pos-thumb" style="left:50%"></div>
     </div>
-    <span class="pos-lim">±105°</span>
+    <span class="pos-lim">±180°</span>
   </div>
   <div class="btn-row">
     <div class="btn run" onclick="doRun()">▶ Run</div>
@@ -494,7 +494,7 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
 const BASE   = `${location.protocol}//${location.hostname}:8080`;
 const WS_URL = `ws://${location.hostname}:8081`;
 const TAU    = Math.PI * 2;
-const MAX_DEG = 105;
+const MAX_DEG = 180;
 const PPR  = 400, GEAR = 5;                 // motor pulses/rev, gearbox reduction
 const DEG_PER_STEP = 360 / (PPR * GEAR);    // arm degrees per motor step (0.18°)
 
@@ -1471,7 +1471,7 @@ function speedAmpMax(freq) {
 
 // Effective amplitude ceiling = travel limit, and (if enabled) speed feasibility.
 function effectiveAmpMax(freqId) {
-  let m = limitActive ? motorLimit() : 105;
+  let m = limitActive ? motorLimit() : 180;
   if (speedClampActive) m = Math.min(m, speedAmpMax(+ge(freqId).value));
   return Math.max(1, Math.round(m));
 }
@@ -1492,7 +1492,7 @@ function updateSpeedClamp() {
 }
 
 function buildParams() {
-  const limit = limitActive ? motorLimit() : 105;
+  const limit = limitActive ? motorLimit() : 180;
   const speed = +ge('mspd').value;
   const center = motorCenter();   // zero-offset calibration, applied to all modes
 

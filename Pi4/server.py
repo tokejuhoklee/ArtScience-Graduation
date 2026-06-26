@@ -591,7 +591,7 @@ class DoublePendulum:
 class OscillatorEngine:
     RATE      = 25       # Hz — move commands sent to Pico
     SIM_DT    = 0.003    # chaos ODE integration step (s)
-    MAX_DEG   = 105
+    MAX_DEG   = 180
     MIN_SPS   = 50       # Pico's minSpeed floor
     MAX_SPS   = 3000     # Pico's maxSpeed ceiling
     SPS_QUANT = 25       # round commanded speed to this grid (gates resends)
@@ -637,7 +637,7 @@ class OscillatorEngine:
 
         # Motor setup: set hard travel limit, disable ramps for smooth tracking
         limit = int(initial_params.get('limit', 90))
-        limit = max(10, min(105, limit))
+        limit = max(10, min(180, limit))
         for cmd in ("on", f"angle {limit}", "softstartoff", "brakeoff", "quieton"):
             serial_mgr.send(cmd)
             await asyncio.sleep(0.04)
@@ -673,7 +673,7 @@ class OscillatorEngine:
 
                 # Mode can change tick-to-tick (timeline sequencing sine↔chaos)
                 mode = p.get('mode', init_mode)
-                lim  = max(10, min(105, int(p.get('limit', 90))))
+                lim  = max(10, min(180, int(p.get('limit', 90))))
 
                 center = p.get('center', 0.0)   # zero-offset calibration (degrees)
                 if mode == 'chaos':

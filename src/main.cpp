@@ -31,7 +31,7 @@ int drivenTeeth = 5;
 float gearReduction = 5.0;
 
 int currentAngle = 100;
-const int minAngle = 5, maxAngle = 170;
+const int minAngle = 5, maxAngle = 180;
 int moveRange = 0;
 
 int currentSpeed = 100;
