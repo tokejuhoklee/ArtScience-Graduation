@@ -471,11 +471,6 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
       stop the run, jog the arm to true down, then Set 0 — holds across off/on
     </div>
 
-    <div class="btn" onclick="doStallHome()" style="margin-top:8px;padding:9px;border-color:#6c5420;color:#fcb84c">⤓ Home to stop</div>
-    <div style="font-size:9px;color:#4a4a6a;padding:2px 0 0">
-      drives gently into the safe stop for an absolute reference — re-run after a
-      cooldown. VERIFY ALM pin &amp; direction first.
-    </div>
   </div>
 
 </div><!-- /scroll -->
@@ -1650,13 +1645,6 @@ function jog(dir) {
 function setCenterHere() {
   fetch(`${BASE}/api/cmd?c=calibrate`, {signal:AbortSignal.timeout(3000)}).catch(()=>{});
   motorAngle = 0;
-}
-
-// Stall-home into the safe stop (firmware drives gently until the driver alarms).
-function doStallHome() {
-  if (!confirm('Drive the arm into the safe stop to home?\nMake sure the direction is toward the SAFE end, not the pillar.')) return;
-  doStop();
-  fetch(`${BASE}/api/cmd?c=stallhome`, {signal:AbortSignal.timeout(3000)}).catch(()=>{});
 }
 
 function scheduleUpdate() {

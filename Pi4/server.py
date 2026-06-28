@@ -921,7 +921,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path in ("/", "/index.html"):
             self.send_response(302)
-            self.send_header("Location", "/mobile")
+            self.send_header("Location", "/chaos")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             return
