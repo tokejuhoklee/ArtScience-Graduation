@@ -471,6 +471,12 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
       stop the run, jog the arm to true down, then Set 0 — holds across off/on
     </div>
 
+    <div class="btn" onclick="doPark()" style="margin-top:8px;padding:9px">⏸ Park &amp; cool (off at 0)</div>
+    <div style="font-size:9px;color:#4a4a6a;padding:2px 0 0">
+      returns to neutral then de-energizes — use this instead of Off so it comes
+      back centered after a cooldown
+    </div>
+
   </div>
 
 </div><!-- /scroll -->
@@ -1605,6 +1611,18 @@ async function doOff() {
   try {
     await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
     await fetch(`${BASE}/api/cmd?c=off`,{signal:AbortSignal.timeout(3000)});
+  } catch {}
+}
+
+// Park: stop, return to neutral, then de-energize — so re-enable comes back
+// centered (for cooling without losing the zero).
+async function doPark() {
+  runT0=null;
+  activeTimeline=false;
+  clearInterval(tlTimer);
+  try {
+    await fetch(`${BASE}/api/osc/stop`,{method:'POST',signal:AbortSignal.timeout(3000)});
+    await fetch(`${BASE}/api/cmd?c=park`,{signal:AbortSignal.timeout(3000)});
   } catch {}
 }
 

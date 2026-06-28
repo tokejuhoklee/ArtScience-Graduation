@@ -82,6 +82,11 @@ const unsigned long BOOT_SETTLE_MS = 8000;   // tune to how long the arm takes t
 bool booting = true;
 unsigned long bootStart = 0;
 
+// Park: drive to neutral (0), then de-energize. The closed-loop driver snaps
+// back to its commanded position on re-enable, so parking at 0 first means the
+// next power-on returns to neutral — survives an off (e.g. for cooling).
+bool parkPending = false;
+
 //
 // === UTILITIES ===
 //
@@ -398,6 +403,14 @@ void handleSerialCommands() {
           currentTarget -= shift;
           printLog("Calibrated. Current = 0");
         }
+        else if (cmd == "park") {
+          // Go to neutral, then de-energize (loop finishes it). Leaves the
+          // driver commanded at 0 so re-enable returns here.
+          if (!motorEnabled) setMotorEnabled(true);
+          parkPending = true;
+          smartMoveTo(0);
+          printLog("Parking to neutral...");
+        }
         else if (cmd == "status") {
           printLog("=== STATUS ===");
           printLog("Position: " + String(currentPosition));
@@ -486,6 +499,16 @@ void loop() {
   // Handle serial commands (but don't let it block stepping)
   if (Serial.available() > 0) {
     handleSerialCommands();
+  }
+
+  // Park: once the move to neutral has finished, de-energize.
+  if (parkPending) {
+    long sr; noInterrupts(); sr = stepsRemaining; interrupts();
+    if (sr == 0) {
+      parkPending = false;
+      setMotorEnabled(false);
+      printLog("Parked at neutral. Motor off.");
+    }
   }
 
   // Read volatile variables safely for logic
