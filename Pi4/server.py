@@ -227,6 +227,7 @@ class SafetyMonitor:
         self._ref_full        = None   # full-frame background captured at arm time
         self._upper_hits      = 0      # consecutive frames of approach presence
         self._hold_start_until= 0.0    # refractory after parking
+        self._tl_resume_offset= 0.0    # continue the show here on next approach
         self._lock         = threading.Lock()
         self._load()
 
@@ -360,7 +361,9 @@ class SafetyMonitor:
         if osc_engine.running:
             if now - self.last_activity_t > self.idle_timeout:
                 print("Presence: room idle — parking")
-                osc_engine.stop()
+                if osc_engine.tl_active:   # remember where the show was —
+                    self._tl_resume_offset = osc_engine.tl_elapsed
+                osc_engine.stop()          # — it continues there next approach
                 serial_mgr.send("park")          # to neutral, then de-energize
                 self._hold_start_until = now + 8.0   # let the park move finish
                 self._upper_hits = 0
@@ -374,10 +377,13 @@ class SafetyMonitor:
             if self._upper_hits >= 3 and _event_loop is not None:
                 bundle = load_show_bundle()
                 if bundle.get('timeline'):
-                    print("Presence: approach detected — starting timeline")
+                    print(f"Presence: approach — resuming timeline at "
+                          f"{self._tl_resume_offset:.1f}s")
                     self._upper_hits = 0
                     self.last_activity_t = now
-                    osc_engine.start({'mode': 'timeline'}, _event_loop)
+                    osc_engine.start({'mode': 'timeline',
+                                      'tl_offset': self._tl_resume_offset},
+                                     _event_loop)
                     self.presence_state = "playing"
 
     def _trip(self, reason):
