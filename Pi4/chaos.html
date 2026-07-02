@@ -839,7 +839,7 @@ function connectWS() {
   if (!location.hostname) return; // opened as file://, no server available
   try {
     ws = new WebSocket(WS_URL);
-    ws.onopen  = () => setDot('dot-ws', 'on');
+    ws.onopen  = () => { setDot('dot-ws', 'on'); bumpCamera(); };  // server back → restart stream
     ws.onclose = () => { setDot('dot-ws', false); setTimeout(connectWS, 2000); };
     ws.onerror = () => setDot('dot-ws', false);
     ws.onmessage = e => {
@@ -1740,7 +1740,9 @@ function setCenterHere() {
 function scheduleUpdate() {
   clearTimeout(updateTimer);
   updateTimer = setTimeout(async ()=>{
-    if (!running) return;
+    // Push even while stopped/paused: adjustments made during a safety pause
+    // (e.g. the centre) must already be on the server when motion auto-resumes
+    // — resuming from the trip-time snapshot looked like a centering drift.
     try {
       await fetch(`${BASE}/api/osc/update`,{
         method:'POST', headers:{'Content-Type':'application/json'},
@@ -1753,6 +1755,18 @@ function scheduleUpdate() {
 // ── Safety (camera proximity cutoff) ─────────────────────────────────────────
 let safetyTripY = 0.55, safetyBelow = true, safetyDragging = false;
 let safetyCfgTimer = null;
+
+// Reload the camera stream (cache-busted). The MJPEG <img> dies silently when
+// the server restarts and never retries on its own — bump it whenever it
+// errors or the server connection comes back.
+function bumpCamera() {
+  const cam = ge('safety-cam');
+  if (cam && cam.src) cam.src = cam.src.split('?')[0] + '?r=' + Date.now();
+}
+document.addEventListener('DOMContentLoaded', () => {
+  const cam = ge('safety-cam');
+  if (cam) cam.addEventListener('error', () => setTimeout(bumpCamera, 2000));
+});
 
 function openSafety() {
   const cam = ge('safety-cam');

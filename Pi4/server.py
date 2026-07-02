@@ -412,7 +412,14 @@ class SafetyMonitor:
         self._clear_since = None
         if self._was_running and self._resume_params and _event_loop is not None:
             try:
-                osc_engine.start(self._resume_params, _event_loop)
+                params = dict(self._resume_params)
+                # Overlay motor settings adjusted during the pause (the browser
+                # keeps pushing them while stopped), so the show resumes with
+                # the current centre/limit/speed — not the trip-time snapshot.
+                for k in ('center', 'speed', 'limit'):
+                    if k in osc_engine.params:
+                        params[k] = osc_engine.params[k]
+                osc_engine.start(params, _event_loop)
                 print("Safety: zone clear — motion resumed")
             except Exception as e:
                 print(f"Safety resume error: {e}")
