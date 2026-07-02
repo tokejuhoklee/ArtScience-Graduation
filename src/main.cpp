@@ -30,12 +30,12 @@ int drivingTeeth = 1;
 int drivenTeeth = 5;
 float gearReduction = 5.0;
 
-int currentAngle = 100;
+int currentAngle = 140;
 const int minAngle = 5, maxAngle = 180;
 int moveRange = 0;
 
 int currentSpeed = 100;
-int minSpeed = 50, maxSpeed = 4000;
+int minSpeed = 50, maxSpeed = 3500;
 int minBrakeSpeed = 50;
 
 bool quietMode = false;   // suppress serial logging during high-rate oscillator control

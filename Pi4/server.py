@@ -209,23 +209,23 @@ class SafetyMonitor:
         self.arm_on_boot   = True    # arm automatically when the server starts
         self.fg_frac       = 0.0     # current foreground fraction (for UI tuning)
         self.last_frame_t  = 0.0
-        self._ref          = None    # static reference of the empty danger zone
         self._clear_since  = None    # when the zone first became clear (while tripped)
         self._was_running  = False   # was the oscillator running at trip time
         self._resume_params= None    # params to restart with on auto-resume
-        # Presence (attract) mode: start the stored timeline when someone
-        # approaches (motion on the far side of the trip line), park when the
-        # room has been still for idle_timeout. Motion = frame-to-frame diff,
-        # so a person standing still stops counting as activity.
+        # Presence (attract) mode: start the stored timeline as soon as the
+        # approach zone (far side of the trip line) differs from the armed
+        # background — same static-reference scheme as the intrusion detector,
+        # so a person standing still keeps counting as present. Park once the
+        # whole frame has matched the background for idle_timeout.
         self.presence_enabled = False
-        self.presence_thresh  = 0.02   # motion fraction that counts as activity
-        self.idle_timeout     = 60.0   # park after this long without activity (s)
+        self.presence_thresh  = 0.02   # differing fraction that counts as presence
+        self.idle_timeout     = 60.0   # park after this long with nobody in view (s)
         self.presence_state   = "off"
-        self.upper_frac       = 0.0    # live motion in the approach zone
-        self.room_frac        = 0.0    # live motion across the whole frame
+        self.upper_frac       = 0.0    # live background-diff in the approach zone
+        self.room_frac        = 0.0    # live background-diff across the whole frame
         self.last_activity_t  = time.time()
-        self._prev_small      = None
-        self._upper_hits      = 0      # consecutive frames of approach motion
+        self._ref_full        = None   # full-frame background captured at arm time
+        self._upper_hits      = 0      # consecutive frames of approach presence
         self._hold_start_until= 0.0    # refractory after parking
         self._lock         = threading.Lock()
         self._load()
@@ -243,12 +243,13 @@ class SafetyMonitor:
             if "presence_thresh" in d:  self.presence_thresh = max(0.002, min(0.3, float(d["presence_thresh"])))
             if "idle_timeout" in d:     self.idle_timeout = max(5.0, min(900.0, float(d["idle_timeout"])))
             if any(k in d for k in ("trip_y", "danger_below", "exclude")):
-                self._ref = None     # geometry changed -> recapture reference
+                self._ref_full = None   # geometry changed -> recapture background
         self._save()
 
     def arm(self):
         with self._lock:
-            self._ref = None; self.tripped = False; self.trip_reason = ""
+            self._ref_full = None
+            self.tripped = False; self.trip_reason = ""
             self.armed = True; self.last_frame_t = time.time()
 
     def disarm(self):
@@ -257,7 +258,8 @@ class SafetyMonitor:
 
     def rearm(self):
         with self._lock:
-            self._ref = None; self.tripped = False; self.trip_reason = ""
+            self._ref_full = None
+            self.tripped = False; self.trip_reason = ""
             self.last_frame_t = time.time()
 
     def _region(self, gray):
@@ -271,6 +273,15 @@ class SafetyMonitor:
             reg[max(0, ey0-y0):max(0, ey1-y0), ex0:ex1] = 0  # blank whip arc
         return reg
 
+    # Adaptive background: pixels that match the background keep blending
+    # toward the current frame, so gradual lighting drift (weather, day/night)
+    # never invalidates the reference; pixels that differ (a person) are
+    # frozen so they can't be absorbed. The much slower recovery rate on
+    # differing pixels self-heals a sudden lighting step (lights switched,
+    # passing cloud) in ~15 min. Re-arm still re-baselines instantly.
+    BG_ALPHA_MATCH   = 0.001     # matched pixels: τ ≈ 50 s at 20 fps
+    BG_ALPHA_RECOVER = 0.00006   # differing pixels: τ ≈ 14 min at 20 fps
+
     def process(self, gray):
         if not self.armed or cv2 is None:
             return
@@ -278,29 +289,39 @@ class SafetyMonitor:
         try:
             small = cv2.GaussianBlur(cv2.resize(gray, (320, 240)), (21, 21), 0)
 
-            # Presence: frame-to-frame motion (a still person = no activity, so
-            # the idle timer can park; any movement = activity).
-            if self._prev_small is not None and self._prev_small.shape == small.shape:
-                m = cv2.threshold(cv2.absdiff(small, self._prev_small), 20, 255,
-                                  cv2.THRESH_BINARY)[1]
-                y = int(self.trip_y * m.shape[0])
-                upper = m[:y, :] if self.danger_below else m[y:, :]
-                self.room_frac  = cv2.countNonZero(m) / max(1, m.size)
-                self.upper_frac = cv2.countNonZero(upper) / max(1, upper.size)
-                if self.room_frac > self.presence_thresh:
-                    self.last_activity_t = time.time()
-                self._upper_hits = (self._upper_hits + 1
-                                    if self.upper_frac > self.presence_thresh else 0)
-            self._prev_small = small
-
             with self._lock:
-                reg = self._region(small)
-                if self._ref is None or self._ref.shape != reg.shape:
-                    self._ref = reg
+                if self._ref_full is None or self._ref_full.shape != small.shape:
+                    self._ref_full = small.astype(np.float32)   # baseline capture
                     return
-                diff = cv2.absdiff(reg, self._ref)
+                refarr = self._ref_full          # local handle: safe vs re-arm race
                 thr, min_frac = self.diff_thresh, self.min_area_frac
-            mask = cv2.dilate(cv2.threshold(diff, thr, 255, cv2.THRESH_BINARY)[1], None, iterations=2)
+
+            full_diff = cv2.absdiff(small, cv2.convertScaleAbs(refarr))
+            fm = cv2.threshold(full_diff, thr, 255, cv2.THRESH_BINARY)[1]
+
+            # Conservative background update (rates above): adapt where the
+            # scene matches; barely adapt foreground and a halo around it.
+            fg_area = cv2.dilate(fm, None, iterations=2)
+            cv2.accumulateWeighted(small, refarr, self.BG_ALPHA_MATCH,
+                                   mask=cv2.bitwise_not(fg_area))
+            cv2.accumulateWeighted(small, refarr, self.BG_ALPHA_RECOVER,
+                                   mask=fg_area)
+
+            # Presence: the approach zone is the mirror of the danger zone —
+            # same background difference, opposite side of the line. A person
+            # standing still keeps counting; empty room = frame matches bg.
+            fy = int(self.trip_y * fm.shape[0])
+            upper = fm[:fy, :] if self.danger_below else fm[fy:, :]
+            self.room_frac  = cv2.countNonZero(fm) / max(1, fm.size)
+            self.upper_frac = cv2.countNonZero(upper) / max(1, upper.size)
+            if self.room_frac > self.presence_thresh:
+                self.last_activity_t = time.time()
+            self._upper_hits = (self._upper_hits + 1
+                                if self.upper_frac > self.presence_thresh else 0)
+
+            # Danger zone: crop of the same mask (+ whip exclude box), dilated
+            reg  = self._region(fm)
+            mask = cv2.dilate(reg, None, iterations=2)
             self.fg_frac = cv2.countNonZero(mask) / max(1, reg.size)
             clear = self.fg_frac <= min_frac
             if not self.tripped:
@@ -330,7 +351,7 @@ class SafetyMonitor:
         stillness. Requires the safety monitor to be armed (it supplies the
         camera analysis) and never starts while tripped."""
         if not (self.presence_enabled and self.armed and cv2 is not None):
-            self.presence_state = "off"
+            self.presence_state = "off" if not self.presence_enabled else "off (needs arm)"
             return
         if self.tripped:
             self.presence_state = "paused (intrusion)"
@@ -742,7 +763,7 @@ class OscillatorEngine:
     SIM_DT    = 0.003    # chaos ODE integration step (s)
     MAX_DEG   = 180
     MIN_SPS   = 50       # Pico's minSpeed floor
-    MAX_SPS   = 4000     # Pico's maxSpeed ceiling
+    MAX_SPS   = 3500     # Pico's maxSpeed ceiling
     SPS_QUANT = 25       # round commanded speed to this grid (gates resends)
 
     def __init__(self):
@@ -816,7 +837,7 @@ class OscillatorEngine:
             self.tl_count  = len(tl['timeline'])
 
         # Motor setup: set hard travel limit, disable ramps for smooth tracking
-        limit = int(tl['motor'].get('limit', 90) if tl else initial_params.get('limit', 90))
+        limit = int(tl['motor'].get('limit', 140) if tl else initial_params.get('limit', 140))
         limit = max(10, min(180, limit))
         for cmd in ("on", f"angle {limit}", "softstartoff", "brakeoff", "quieton"):
             serial_mgr.send(cmd)
@@ -867,13 +888,13 @@ class OscillatorEngine:
                             self._reseed = True   # fresh ICs each (re)entry — no taper
                     tl['prev_e'] = e
                     p = {**seg,
-                         'limit':  tl['motor'].get('limit', 90),
-                         'speed':  tl['motor'].get('speed', 2000),
+                         'limit':  tl['motor'].get('limit', 140),
+                         'speed':  tl['motor'].get('speed', 2250),
                          'center': tl['motor'].get('center', 0.0)}
 
                 # Mode can change tick-to-tick (timeline sequencing sine↔chaos)
                 mode = p.get('mode', init_mode)
-                lim  = max(10, min(180, int(p.get('limit', 90))))
+                lim  = max(10, min(180, int(p.get('limit', 140))))
 
                 center = p.get('center', 0.0)   # zero-offset calibration (degrees)
                 if mode == 'chaos':
@@ -899,7 +920,7 @@ class OscillatorEngine:
                 # Velocity matching: pick the step rate that covers this segment
                 # in exactly one tick, so the motor glides instead of dashing and
                 # idling. The user's speed slider is the upper bound.
-                cap = max(self.MIN_SPS, min(self.MAX_SPS, int(p.get('speed', 2000))))
+                cap = max(self.MIN_SPS, min(self.MAX_SPS, int(p.get('speed', 2250))))
                 if last_steps is None:
                     target_sps = cap        # first move: go at full cap to seed
                 else:
