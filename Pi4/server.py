@@ -465,6 +465,9 @@ class SafetyMonitor:
                 self.auto_resume = d.get("auto_resume", self.auto_resume)
                 self.resume_delay = d.get("resume_delay", self.resume_delay)
                 self.arm_on_boot = d.get("arm_on_boot", self.arm_on_boot)
+                self.presence_enabled = d.get("presence_enabled", self.presence_enabled)
+                self.presence_thresh = d.get("presence_thresh", self.presence_thresh)
+                self.idle_timeout = d.get("idle_timeout", self.idle_timeout)
         except Exception as e:
             print(f"Safety config load error: {e}")
 
