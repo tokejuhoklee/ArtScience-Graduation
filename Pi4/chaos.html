@@ -393,6 +393,32 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     </div>
 
     <div class="card">
+      <span class="card-label">Presence (auto show)</span>
+      <div class="tog-row">
+        <span>Start on approach · park when idle</span>
+        <div class="tog" id="tog-presence" onclick="this.classList.toggle('on'); pushSafetyConfig()"></div>
+      </div>
+      <div class="prow">
+        <span class="plabel">Idle</span>
+        <input type="range" id="saf-idle" min="10" max="600" step="5" value="60">
+        <span class="pval" id="saf-idle-v">60 s</span>
+      </div>
+      <div class="prow">
+        <span class="plabel">Motion</span>
+        <input type="range" id="saf-motion" min="0.005" max="0.15" step="0.005" value="0.02">
+        <span class="pval" id="saf-motion-v">2.0%</span>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a;padding:0 0 2px 52px">
+        state: <span id="saf-presence-state">off</span> · approach <span id="saf-upper">0%</span> · room <span id="saf-room">0%</span>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a">
+        plays the saved timeline when someone moves on the far side of the line;
+        parks the motor once the whole room has been still for the idle time.
+        needs the monitor armed.
+      </div>
+    </div>
+
+    <div class="card">
       <span class="card-label">Status: <span id="saf-status">disarmed</span></span>
       <div class="btn-row">
         <div class="btn run" id="saf-arm" onclick="armSafety()">● Arm</div>
@@ -535,6 +561,8 @@ const CENTER_KEY = 'whip_center';   // zero-offset calibration, persists across 
 const TL_SESSION_KEY = 'whip_tl_t0';   // active timeline start (ms) — survives refresh
 let tlRestored = false;                // have we tried to restore a timeline session?
 let _pendingReseed = false;            // re-seed the server's chaos ICs on next push
+let tlPausedAt = null;                 // ms when a safety trip paused the timeline
+let serverTl = false;                  // the server is playing the timeline itself
 
 // Save to localStorage (instant, offline) and mirror to the Pi4 (cross-device,
 // survives cache clears). Server is treated as the shared source of truth.
@@ -546,9 +574,15 @@ function persist() {
   } catch {}
   fetch(`${BASE}/api/presets`, {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({presets, timeline, loop: loopTimeline}), signal:AbortSignal.timeout(3000),
+    body: JSON.stringify({presets, timeline, loop: loopTimeline,
+      // motor settings ride along so the server can play the show by itself
+      motor: {limit: motorLimit(), speed: maxSps(), center: motorCenter()},
+    }), signal:AbortSignal.timeout(3000),
   }).catch(()=>{});
 }
+
+let persistTimer = null;
+function persistSoon() { clearTimeout(persistTimer); persistTimer = setTimeout(persist, 600); }
 
 function setLoopUI() {
   const t = ge('tog-loop');
@@ -812,19 +846,47 @@ function connectWS() {
       try {
         const d = JSON.parse(e.data);
         setDot('dot-serial', d.serial ? 'on' : false);
+        const tripped = !!(d.safety && d.safety.tripped);
         if (d.osc !== undefined) {
           running = d.osc.running;
           ge('badge').classList.toggle('on', running);
           if (d.osc.running && d.osc.angle !== undefined) {
             updatePosBar(d.osc.angle);
           }
+
+          // Browser-driven timeline: pause the clock on a safety trip, shift
+          // it forward when the zone clears and motion resumes — the show
+          // continues from where it was interrupted.
+          if (activeTimeline && runT0 !== null) {
+            if (tripped && tlPausedAt === null) {
+              tlPausedAt = Date.now();
+            } else if (!tripped && tlPausedAt !== null && d.osc.running) {
+              runT0 += Date.now() - tlPausedAt;
+              tlPausedAt = null;
+              try { localStorage.setItem(TL_SESSION_KEY, String(runT0)); } catch {}
+            }
+          }
+
+          // Server-driven timeline (presence mode / trip-resume): show which
+          // step is live even though this page isn't driving it.
+          if (d.osc.tl && !activeTimeline) {
+            serverTl = true;
+            const st = d.osc.tl;
+            const now = ge('tl-now');
+            now.textContent = `${tripped ? '⏸' : '▶'} ${st.name} (${st.idx+1}/${st.count})`;
+            now.style.display = '';
+          } else if (serverTl && !d.osc.tl && !activeTimeline) {
+            serverTl = false;
+            ge('tl-now').style.display = 'none';
+          }
+
           // Resume a timeline that was playing before a page refresh, so the
           // active-step indicator keeps tracking (and the server keeps morphing).
           if (!tlRestored) {
             tlRestored = true;
             let t0 = 0;
             try { t0 = +localStorage.getItem(TL_SESSION_KEY); } catch {}
-            if (t0 && d.osc.running && timeline.length) {
+            if (t0 && d.osc.running && timeline.length && !d.osc.tl) {
               runT0 = t0; activeTimeline = true; startTimelinePush();
             } else {
               try { localStorage.removeItem(TL_SESSION_KEY); } catch {}
@@ -1276,9 +1338,12 @@ function interpolate(a, b, t) {
 }
 
 // Elapsed seconds into the timeline; wraps to the start when looping.
+// While a safety trip has the show paused, the clock freezes at the trip
+// moment (runT0 is shifted forward when the zone clears).
 function timelineElapsed() {
   if (runT0 === null) return 0;
-  let e = (Date.now() - runT0) / 1000;
+  const nowMs = tlPausedAt !== null ? tlPausedAt : Date.now();
+  let e = (nowMs - runT0) / 1000;
   if (loopTimeline) {
     const total = timeline.reduce((s, t) => s + t.duration, 0);
     if (total > 0) e = e % total;
@@ -1370,14 +1435,14 @@ function applyTimelineFrame() {
   // Always track the active step — highlight in the list + a header indicator
   // visible on every tab, so you know where you are while editing presets.
   const idx = timelineActiveIndex(elapsed);
+  const now = ge('tl-now');
+  now.textContent = `${tlPausedAt !== null ? '⏸' : '▶'} ${timeline[idx].presetName} (${idx+1}/${timeline.length})`;
+  now.style.display = '';
   if (idx !== _tlActiveIdx) {
     _tlActiveIdx = idx;
     const items = ge('timeline-list').children;
     for (let i = 0; i < items.length; i++)
       if (items[i].classList) items[i].classList.toggle('active', i === idx);
-    const now = ge('tl-now');
-    now.textContent = `▶ ${timeline[idx].presetName} (${idx+1}/${timeline.length})`;
-    now.style.display = '';
 
     // Entering a chaos segment: re-seed its initial conditions so it starts
     // with full energy again (otherwise damping makes it taper over loops).
@@ -1425,9 +1490,12 @@ function bindSliders() {
       if(isIC && ge('tog-reset').classList.contains('on')) resetChaos();
       if(!isIC && id.startsWith('c') && chaosDP) chaosDP.damping=+ge('cdamp').value;
 
-      // Amplitude ceilings depend on motor limit, max speed, and osc frequency
-      if(id==='mlimit' || id==='mspd' || id==='s1f' || id==='s2f') refreshAmpLimits();
+      // Amplitude ceilings depend on motor limit, max speed, centre offset,
+      // and osc frequency
+      if(id==='mlimit' || id==='mspd' || id==='mcenter' || id==='s1f' || id==='s2f') refreshAmpLimits();
       if(id==='mcenter') { try { localStorage.setItem(CENTER_KEY, el.value); } catch {} }
+      // Motor settings feed server-side timeline playback — keep the Pi copy fresh
+      if(id==='mlimit' || id==='mspd' || id==='mcenter') persistSoon();
       scheduleUpdate();
     });
   });
@@ -1476,9 +1544,11 @@ function speedAmpMax(freq) {
   return armVelCap() / (TAU * Math.max(freq, 0.001));
 }
 
-// Effective amplitude ceiling = travel limit, and (if enabled) speed feasibility.
+// Effective amplitude ceiling = travel limit minus the centre offset (a shifted
+// swing hits the near clamp early — this is what made offset sine presets clip
+// on one side), and (if enabled) speed feasibility.
 function effectiveAmpMax(freqId) {
-  let m = limitActive ? motorLimit() : 180;
+  let m = (limitActive ? motorLimit() : 180) - Math.abs(motorCenter());
   if (speedClampActive) m = Math.min(m, speedAmpMax(+ge(freqId).value));
   return Math.max(1, Math.round(m));
 }
@@ -1558,6 +1628,7 @@ async function doRun() {
   activeTimeline = (tab === 'timeline' && timeline.length > 0);
 
   runT0 = Date.now();
+  tlPausedAt = null;
   oscPhase1 = oscPhase2 = 0;   // clean centered start, matching the server
   if (activeTimeline) applyTimelineFrame();   // seed sliders/mode from first segment
   if (mode==='chaos' || activeTimeline) {
@@ -1592,6 +1663,7 @@ function startTimelinePush() {
 async function doStop() {
   runT0=null;
   activeTimeline=false;
+  tlPausedAt=null;
   clearInterval(tlTimer);
   _tlActiveIdx = -1;
   try { localStorage.removeItem(TL_SESSION_KEY); } catch {}
@@ -1701,6 +1773,9 @@ function applySafetyState(s, full) {
   ge('saf-arm').style.opacity = s.armed ? '0.5' : '';
   ge('saf-fg').textContent = (s.fg*100).toFixed(1) + '%';
   ge('saf-cv-warn').style.display = s.cv ? 'none' : '';
+  if (s.presence_state !== undefined) ge('saf-presence-state').textContent = s.presence_state;
+  if (s.upper !== undefined) ge('saf-upper').textContent = (s.upper*100).toFixed(1) + '%';
+  if (s.room  !== undefined) ge('saf-room').textContent  = (s.room*100).toFixed(1) + '%';
   if (full) {
     ge('tog-danger').classList.toggle('on', safetyBelow);
     ge('saf-sens').value = s.min_area_frac;
@@ -1710,6 +1785,15 @@ function applySafetyState(s, full) {
     if (s.resume_delay !== undefined) {
       ge('saf-delay').value = s.resume_delay;
       ge('saf-delay-v').textContent = (+s.resume_delay).toFixed(1) + ' s';
+    }
+    if (s.presence_enabled !== undefined) ge('tog-presence').classList.toggle('on', s.presence_enabled);
+    if (s.idle_timeout !== undefined) {
+      ge('saf-idle').value = s.idle_timeout;
+      ge('saf-idle-v').textContent = Math.round(s.idle_timeout) + ' s';
+    }
+    if (s.presence_thresh !== undefined) {
+      ge('saf-motion').value = s.presence_thresh;
+      ge('saf-motion-v').textContent = (s.presence_thresh*100).toFixed(1) + '%';
     }
   }
   renderSafetyOverlay();
@@ -1737,6 +1821,9 @@ function pushSafetyConfig() {
         auto_resume: ge('tog-resume').classList.contains('on'),
         resume_delay: +ge('saf-delay').value,
         arm_on_boot: ge('tog-armboot').classList.contains('on'),
+        presence_enabled: ge('tog-presence').classList.contains('on'),
+        presence_thresh: +ge('saf-motion').value,
+        idle_timeout: +ge('saf-idle').value,
       }), signal:AbortSignal.timeout(3000),
     }).catch(()=>{});
   }, 200);
@@ -1772,6 +1859,16 @@ document.addEventListener('DOMContentLoaded', () => {
   const dl = ge('saf-delay');
   if (dl) dl.addEventListener('input', () => {
     ge('saf-delay-v').textContent = (+dl.value).toFixed(1) + ' s';
+    pushSafetyConfig();
+  });
+  const idl = ge('saf-idle');
+  if (idl) idl.addEventListener('input', () => {
+    ge('saf-idle-v').textContent = Math.round(+idl.value) + ' s';
+    pushSafetyConfig();
+  });
+  const mo = ge('saf-motion');
+  if (mo) mo.addEventListener('input', () => {
+    ge('saf-motion-v').textContent = (+mo.value*100).toFixed(1) + '%';
     pushSafetyConfig();
   });
 });

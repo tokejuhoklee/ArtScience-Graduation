@@ -213,6 +213,20 @@ class SafetyMonitor:
         self._clear_since  = None    # when the zone first became clear (while tripped)
         self._was_running  = False   # was the oscillator running at trip time
         self._resume_params= None    # params to restart with on auto-resume
+        # Presence (attract) mode: start the stored timeline when someone
+        # approaches (motion on the far side of the trip line), park when the
+        # room has been still for idle_timeout. Motion = frame-to-frame diff,
+        # so a person standing still stops counting as activity.
+        self.presence_enabled = False
+        self.presence_thresh  = 0.02   # motion fraction that counts as activity
+        self.idle_timeout     = 60.0   # park after this long without activity (s)
+        self.presence_state   = "off"
+        self.upper_frac       = 0.0    # live motion in the approach zone
+        self.room_frac        = 0.0    # live motion across the whole frame
+        self.last_activity_t  = time.time()
+        self._prev_small      = None
+        self._upper_hits      = 0      # consecutive frames of approach motion
+        self._hold_start_until= 0.0    # refractory after parking
         self._lock         = threading.Lock()
         self._load()
 
@@ -225,6 +239,9 @@ class SafetyMonitor:
             if "auto_resume" in d:   self.auto_resume = bool(d["auto_resume"])
             if "resume_delay" in d:  self.resume_delay = max(0.0, min(60.0, float(d["resume_delay"])))
             if "arm_on_boot" in d:   self.arm_on_boot = bool(d["arm_on_boot"])
+            if "presence_enabled" in d: self.presence_enabled = bool(d["presence_enabled"])
+            if "presence_thresh" in d:  self.presence_thresh = max(0.002, min(0.3, float(d["presence_thresh"])))
+            if "idle_timeout" in d:     self.idle_timeout = max(5.0, min(900.0, float(d["idle_timeout"])))
             if any(k in d for k in ("trip_y", "danger_below", "exclude")):
                 self._ref = None     # geometry changed -> recapture reference
         self._save()
@@ -260,6 +277,22 @@ class SafetyMonitor:
         self.last_frame_t = time.time()
         try:
             small = cv2.GaussianBlur(cv2.resize(gray, (320, 240)), (21, 21), 0)
+
+            # Presence: frame-to-frame motion (a still person = no activity, so
+            # the idle timer can park; any movement = activity).
+            if self._prev_small is not None and self._prev_small.shape == small.shape:
+                m = cv2.threshold(cv2.absdiff(small, self._prev_small), 20, 255,
+                                  cv2.THRESH_BINARY)[1]
+                y = int(self.trip_y * m.shape[0])
+                upper = m[:y, :] if self.danger_below else m[y:, :]
+                self.room_frac  = cv2.countNonZero(m) / max(1, m.size)
+                self.upper_frac = cv2.countNonZero(upper) / max(1, upper.size)
+                if self.room_frac > self.presence_thresh:
+                    self.last_activity_t = time.time()
+                self._upper_hits = (self._upper_hits + 1
+                                    if self.upper_frac > self.presence_thresh else 0)
+            self._prev_small = small
+
             with self._lock:
                 reg = self._region(small)
                 if self._ref is None or self._ref.shape != reg.shape:
@@ -291,6 +324,41 @@ class SafetyMonitor:
             if time.time() - self.last_frame_t > self.STALE_S:
                 self._trip("no camera frame")
 
+    def presence_tick(self):
+        """Attract-mode FSM (called from the broadcast loop). Start the stored
+        timeline on approach motion; park the motor after idle_timeout of
+        stillness. Requires the safety monitor to be armed (it supplies the
+        camera analysis) and never starts while tripped."""
+        if not (self.presence_enabled and self.armed and cv2 is not None):
+            self.presence_state = "off"
+            return
+        if self.tripped:
+            self.presence_state = "paused (intrusion)"
+            return
+        now = time.time()
+        if osc_engine.running:
+            if now - self.last_activity_t > self.idle_timeout:
+                print("Presence: room idle — parking")
+                osc_engine.stop()
+                serial_mgr.send("park")          # to neutral, then de-energize
+                self._hold_start_until = now + 8.0   # let the park move finish
+                self._upper_hits = 0
+                self.presence_state = "idle (parked)"
+            else:
+                self.presence_state = "playing"
+        else:
+            self.presence_state = "waiting"
+            if now < self._hold_start_until:
+                return
+            if self._upper_hits >= 3 and _event_loop is not None:
+                bundle = load_show_bundle()
+                if bundle.get('timeline'):
+                    print("Presence: approach detected — starting timeline")
+                    self._upper_hits = 0
+                    self.last_activity_t = now
+                    osc_engine.start({'mode': 'timeline'}, _event_loop)
+                    self.presence_state = "playing"
+
     def _trip(self, reason):
         self.tripped = True
         self.trip_reason = reason
@@ -298,6 +366,10 @@ class SafetyMonitor:
         try:
             self._was_running  = osc_engine.running
             self._resume_params = dict(osc_engine.params) if osc_engine.params else None
+            # A server-driven timeline pauses: freeze its position so the resume
+            # continues from where it was interrupted, not from the beginning.
+            if self._resume_params and self._resume_params.get('mode') == 'timeline':
+                self._resume_params['tl_offset'] = osc_engine.tl_elapsed
             # Hold (energized), don't de-energize: an off/on cycle decouples the
             # closed-loop driver's reference from the Pico's and can shift the
             # swing into the pillar. osc_engine.stop() halts motion but the motor
@@ -326,6 +398,11 @@ class SafetyMonitor:
             "min_area_frac": self.min_area_frac, "exclude": self.exclude,
             "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
             "arm_on_boot": self.arm_on_boot,
+            "presence_enabled": self.presence_enabled,
+            "presence_thresh": self.presence_thresh,
+            "idle_timeout": self.idle_timeout,
+            "presence_state": self.presence_state,
+            "upper": round(self.upper_frac, 4), "room": round(self.room_frac, 4),
             "fg": round(self.fg_frac, 4), "cv": cv2 is not None,
         }
 
@@ -336,6 +413,9 @@ class SafetyMonitor:
                 "min_area_frac": self.min_area_frac, "exclude": self.exclude,
                 "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
                 "arm_on_boot": self.arm_on_boot,
+                "presence_enabled": self.presence_enabled,
+                "presence_thresh": self.presence_thresh,
+                "idle_timeout": self.idle_timeout,
             }, indent=2))
         except Exception as e:
             print(f"Safety config save error: {e}")
@@ -590,6 +670,72 @@ class DoublePendulum:
         self.w1  += dt/6*(k1[2]+2*k2[2]+2*k3[2]+k4[2])
         self.w2  += dt/6*(k1[3]+2*k2[3]+2*k3[3]+k4[3])
 
+# ── Server-side timeline playback ─────────────────────────────────────────────
+# Python twin of the client's easing/interpolation, so the stored show
+# (chaos_presets.json: presets + timeline + loop + motor) can play without a
+# browser — needed for presence mode and pause/continue across safety trips.
+_EASINGS = {
+    'linear':      lambda t: t,
+    'ease-in':     lambda t: t*t,
+    'ease-out':    lambda t: t*(2-t),
+    'ease-in-out': lambda t: 2*t*t if t < 0.5 else -1+(4-2*t)*t,
+}
+
+def _ease(t, name):
+    t = max(0.0, min(1.0, t))
+    return _EASINGS.get(name, _EASINGS['linear'])(t)
+
+def load_show_bundle():
+    try:
+        if CHAOS_PRESETS.exists():
+            return json.loads(CHAOS_PRESETS.read_text())
+    except Exception as e:
+        print(f"Show bundle load error: {e}")
+    return {}
+
+_TL_DEFAULTS = {'s1a':80.0,'s1f':0.4,'s1p':0.0,'s2a':25.0,'s2f':1.1,'s2p':90.0,
+                'cL1':1.0,'cL2':0.8,'cm1':1.0,'cm2':0.8,'cth1':130.0,'cth2':95.0,
+                'cw1':0.0,'cdamp':0.01,'cscale':0.58,'csim':1.0}
+
+def _tl_val(pr, key):
+    try:
+        return float(pr.get(key))
+    except (TypeError, ValueError):
+        return _TL_DEFAULTS[key]
+
+def _tl_build(cur, nxt, q):
+    ip = lambda k: _tl_val(cur, k) + (_tl_val(nxt, k) - _tl_val(cur, k)) * q
+    if cur.get('mode', 'chaos') == 'sine':
+        return {'mode': 'sine',
+                'osc1': {'amp': ip('s1a'), 'freq': ip('s1f'), 'phase': ip('s1p')},
+                'osc2': {'amp': ip('s2a'), 'freq': ip('s2f'), 'phase': ip('s2p')}}
+    return {'mode': 'chaos',
+            'L1': ip('cL1'), 'L2': ip('cL2'), 'm1': ip('cm1'), 'm2': ip('cm2'),
+            'th1': ip('cth1'), 'th2': ip('cth2'), 'w1': ip('cw1'),
+            'damping': ip('cdamp'), 'scale': ip('cscale'), 'simSpeed': ip('csim')}
+
+def timeline_engine_params(presets, timeline, elapsed):
+    """Interpolated engine params at `elapsed` s into the timeline.
+    Returns (params, segment_index) or (None, -1)."""
+    if not timeline:
+        return None, -1
+    acc = 0.0
+    for i, item in enumerate(timeline):
+        dur = float(item.get('duration', 5) or 5)
+        if elapsed < acc + dur:
+            q   = _ease((elapsed - acc) / dur if dur > 0 else 1.0,
+                        item.get('easing', 'linear'))
+            cur = presets.get(item.get('presetName'))
+            nxt = presets.get(timeline[i+1].get('presetName')) if i+1 < len(timeline) else cur
+            if not cur:
+                return None, -1
+            return _tl_build(cur, nxt or cur, q), i
+        acc += dur
+    cur = presets.get(timeline[-1].get('presetName'))   # past the end: hold last
+    if not cur:
+        return None, -1
+    return _tl_build(cur, cur, 0.0), len(timeline) - 1
+
 # ── Oscillator engine ─────────────────────────────────────────────────────────
 class OscillatorEngine:
     RATE      = 25       # Hz — move commands sent to Pico
@@ -606,6 +752,12 @@ class OscillatorEngine:
         self._gen         = 0
         self._task        = None
         self._reseed      = False   # recreate the chaos sim from current ICs
+        # Server-driven timeline playback state (mode == 'timeline')
+        self.tl_active    = False
+        self.tl_idx       = -1
+        self.tl_name      = ""
+        self.tl_count     = 0
+        self.tl_elapsed   = 0.0     # frozen at stop -> safety resume continues here
 
     def start(self, params: dict, event_loop):
         self._gen += 1
@@ -633,20 +785,44 @@ class OscillatorEngine:
         serial_mgr.flush_and_stop()
         serial_mgr.send("quietoff")   # restore verbose logging for manual control
         self.running = False
+        self.tl_active = False        # tl_elapsed keeps its value for resume
 
     async def _run(self, initial_params, gen):
         self.running = True
         DT = 1.0 / self.RATE
 
+        init_mode = initial_params.get('mode', 'sine')
+
+        # Timeline mode: the server plays the stored show itself (presets +
+        # timeline + loop + motor from chaos_presets.json) — no browser needed.
+        # tl_offset lets a safety trip pause and continue where it left off.
+        tl = None
+        if init_mode == 'timeline':
+            b  = load_show_bundle()
+            tl = {
+                'presets':  b.get('presets', {}) or {},
+                'timeline': b.get('timeline', []) or [],
+                'loop':     bool(b.get('loop', False)),
+                'motor':    b.get('motor', {}) or {},
+                'offset':   float(initial_params.get('tl_offset', 0.0) or 0.0),
+                'prev_idx': -1, 'prev_e': -1.0,
+            }
+            tl['total'] = sum(float(it.get('duration', 5) or 5) for it in tl['timeline'])
+            if not tl['timeline'] or tl['total'] <= 0:
+                print("Timeline: nothing stored to play")
+                self.running = False
+                return
+            self.tl_active = True
+            self.tl_count  = len(tl['timeline'])
+
         # Motor setup: set hard travel limit, disable ramps for smooth tracking
-        limit = int(initial_params.get('limit', 90))
+        limit = int(tl['motor'].get('limit', 90) if tl else initial_params.get('limit', 90))
         limit = max(10, min(180, limit))
         for cmd in ("on", f"angle {limit}", "softstartoff", "brakeoff", "quieton"):
             serial_mgr.send(cmd)
             await asyncio.sleep(0.04)
 
-        init_mode = initial_params.get('mode', 'sine')
-        dp        = None
+        dp = None
 
         def _make_dp(p):
             return DoublePendulum(
@@ -673,6 +849,27 @@ class OscillatorEngine:
                 dt_real = max(0.0, t - prev_t)
                 prev_t  = t
                 p   = self.params
+
+                if tl:   # server-driven timeline: compute this tick's params
+                    e = tl['offset'] + (now - t0)
+                    e = (e % tl['total']) if tl['loop'] else min(e, tl['total'])
+                    self.tl_elapsed = e
+                    seg, idx = timeline_engine_params(tl['presets'], tl['timeline'], e)
+                    if seg is None:      # missing preset in the bundle — hold still
+                        next_tick += DT
+                        await asyncio.sleep(max(0.0, next_tick - time.time()))
+                        continue
+                    if idx != tl['prev_idx'] or e < tl['prev_e']:   # segment entry / loop wrap
+                        tl['prev_idx'] = idx
+                        self.tl_idx  = idx
+                        self.tl_name = tl['timeline'][idx].get('presetName', '')
+                        if seg['mode'] == 'chaos':
+                            self._reseed = True   # fresh ICs each (re)entry — no taper
+                    tl['prev_e'] = e
+                    p = {**seg,
+                         'limit':  tl['motor'].get('limit', 90),
+                         'speed':  tl['motor'].get('speed', 2000),
+                         'center': tl['motor'].get('center', 0.0)}
 
                 # Mode can change tick-to-tick (timeline sequencing sine↔chaos)
                 mode = p.get('mode', init_mode)
@@ -722,6 +919,7 @@ class OscillatorEngine:
                 await asyncio.sleep(max(0.0, next_tick - time.time()))
         finally:
             self.running = False
+            self.tl_active = False
 
     @staticmethod
     def _sine(phase1, phase2, t, p):
@@ -758,7 +956,8 @@ async def ws_handler(websocket):
 
 async def broadcast_loop():
     while True:
-        safety.check_stale()   # fail-safe: trip if the camera feed went stale
+        safety.check_stale()     # fail-safe: trip if the camera feed went stale
+        safety.presence_tick()   # attract mode: start on approach / park on idle
         lines = serial_mgr.read_available()
         msg = json.dumps({
             "lines": lines,
@@ -772,6 +971,10 @@ async def broadcast_loop():
             "osc": {
                 "running": osc_engine.running,
                 "angle":   round(osc_engine.current_angle, 2),
+                "tl": ({"idx": osc_engine.tl_idx, "name": osc_engine.tl_name,
+                        "count": osc_engine.tl_count,
+                        "elapsed": round(osc_engine.tl_elapsed, 1)}
+                       if osc_engine.tl_active else None),
             },
             "safety": safety.state(),
             "serial": serial_mgr.connected,
@@ -1115,10 +1318,14 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/presets":
+            motor = data.get("motor")
+            if motor is None:   # older client payload — keep the stored motor cfg
+                motor = load_show_bundle().get("motor", {})
             payload = {
                 "presets":  data.get("presets", {}),
                 "timeline": data.get("timeline", []),
                 "loop":     bool(data.get("loop", False)),
+                "motor":    motor,   # limit/speed/center for server-side playback
             }
             CHAOS_PRESETS.write_text(json.dumps(payload, indent=2))
             self.send_json({"ok": True})
