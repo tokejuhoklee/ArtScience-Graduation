@@ -742,7 +742,7 @@ class OscillatorEngine:
     SIM_DT    = 0.003    # chaos ODE integration step (s)
     MAX_DEG   = 180
     MIN_SPS   = 50       # Pico's minSpeed floor
-    MAX_SPS   = 3000     # Pico's maxSpeed ceiling
+    MAX_SPS   = 4000     # Pico's maxSpeed ceiling
     SPS_QUANT = 25       # round commanded speed to this grid (gates resends)
 
     def __init__(self):

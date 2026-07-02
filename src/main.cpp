@@ -35,7 +35,7 @@ const int minAngle = 5, maxAngle = 180;
 int moveRange = 0;
 
 int currentSpeed = 100;
-int minSpeed = 50, maxSpeed = 3000;
+int minSpeed = 50, maxSpeed = 4000;
 int minBrakeSpeed = 50;
 
 bool quietMode = false;   // suppress serial logging during high-rate oscillator control
