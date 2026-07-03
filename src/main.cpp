@@ -134,13 +134,6 @@ const unsigned long REST_RECAL_MS = 4000;
 unsigned long motorOffAt = 0;
 
 void setMotorEnabled(bool on) {
-  if (on && !motorEnabled && motorOffAt != 0 &&
-      (millis() - motorOffAt) >= REST_RECAL_MS) {
-    currentPosition = 0;
-    currentTarget   = 0;
-    appliedDir      = -1;
-    printLog("Re-zeroed at rest (off > 4s)");
-  }
   if (!on && motorEnabled) motorOffAt = millis();
   motorEnabled = on;
   if (ENABLE_PIN >= 0) {
@@ -275,7 +268,21 @@ void handleSerialCommands() {
         // Commands
         if (cmd == "on") {
           parkPending = false;
+          // Wake after a long off: the arm has settled at gravity rest and the
+          // driver adopts that position when energized. Enable FIRST, let the
+          // driver lock and hold, THEN zero — zeroing the held position (user-
+          // verified order: 0-amp sine, then set centre). Zeroing before the
+          // enable measured a limp arm and trusted the wake-up not to shift it.
+          bool longOff = (!motorEnabled && motorOffAt != 0 &&
+                          (millis() - motorOffAt) >= REST_RECAL_MS);
           setMotorEnabled(true);
+          if (longOff) {
+            delay(500);              // driver energize + servo lock
+            currentPosition = 0;     // zero the HELD rest position
+            currentTarget   = 0;
+            appliedDir      = -1;
+            printLog("Re-zeroed at held rest (post-enable)");
+          }
         }
         else if (cmd == "off") { 
           setMotorEnabled(false); 
