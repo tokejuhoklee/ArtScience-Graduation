@@ -491,8 +491,6 @@ class SafetyMonitor:
         print(f"!! SAFETY TRIP: {reason}")
 
     def _resume(self):
-        self.tripped = False
-        self.trip_reason = ""
         self._clear_since = None
         if self._was_running and self._resume_params and _event_loop is not None:
             try:
@@ -504,11 +502,17 @@ class SafetyMonitor:
                     if k in osc_engine.params:
                         params[k] = osc_engine.params[k]
                 show_log.reason = "zone clear"
+                self._upper_hits = 0     # presence must not double-start
                 osc_engine.start(params, _event_loop)
                 print("Safety: zone clear — motion resumed")
             except Exception as e:
                 print(f"Safety resume error: {e}")
         self._was_running = False
+        # Cleared AFTER the restart: while tripped the presence FSM is blocked,
+        # so it can't fire a competing start in the gap (seen live in the log
+        # as a start/stop/start churn within 0.3s).
+        self.tripped = False
+        self.trip_reason = ""
 
     def state(self):
         return {
@@ -875,6 +879,7 @@ class OscillatorEngine:
         self._gen         = 0
         self._task        = None
         self._reseed      = False   # recreate the chaos sim from current ICs
+        self.live_motor   = {}      # last live-pushed center/speed/limit
         # Server-driven timeline playback state (mode == 'timeline')
         self.tl_active    = False
         self.tl_idx       = -1
@@ -892,6 +897,10 @@ class OscillatorEngine:
         time.sleep(0.12)
         self._reseed = False
         self.params = params.copy()
+        # Presence/resume starts pass only mode+offset — inherit the last
+        # live-pushed motor values so the engine's centre always matches the UI
+        for k, v in self.live_motor.items():
+            self.params.setdefault(k, v)
         self._task = asyncio.run_coroutine_threadsafe(
             self._run(params, gen), event_loop
         )
@@ -899,6 +908,9 @@ class OscillatorEngine:
     def update(self, params: dict):
         if params.get("reseed"):
             self._reseed = True   # chaos segment (re)started — re-seed ICs
+        for k in ('center', 'speed', 'limit'):
+            if k in params:
+                self.live_motor[k] = params[k]
         self.params.update(params)
 
     def stop(self):
