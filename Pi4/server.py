@@ -1367,13 +1367,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/showlog":
-            # Activity summary over the last N hours (?h=24): events + how much
-            # of the window the show was running. Timestamps only — no images.
+            # Activity summary (?h=24): events + how much of the exhibition's
+            # OPEN HOURS (10:00-20:00 local) the show was running. Timestamps
+            # only — no images, no counting.
+            OPEN_FROM, OPEN_TO = 10, 20
             try:
                 hours = max(0.1, min(24*30, float(qs.get("h", ["24"])[0])))
             except ValueError:
                 hours = 24.0
-            cutoff = time.time() - hours*3600
+            now_ts = time.time()
+            cutoff = now_ts - hours*3600
             events = []
             try:
                 if SHOW_LOG.exists():
@@ -1386,25 +1389,44 @@ class Handler(BaseHTTPRequestHandler):
                             pass
             except Exception as e:
                 print(f"Show log read error: {e}")
-            active = 0.0; runs = 0; longest = 0.0; t_open = None
+
+            def open_overlap(a, b):
+                """Seconds of [a, b] falling inside opening hours (local)."""
+                total, t = 0.0, a
+                while t < b:
+                    lt = time.localtime(t)
+                    day0 = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                                        0, 0, 0, 0, 0, -1))
+                    total += max(0.0, min(b, day0 + OPEN_TO*3600)
+                                 - max(t, day0 + OPEN_FROM*3600))
+                    t = day0 + 86400
+                return total
+
+            # Reconstruct run intervals (ran_s preferred, so runs straddling
+            # the window edge count correctly), then clip to open hours.
+            intervals, t_run = [], None
             for r in events:
                 if r["ev"] == "start":
-                    t_open = r["ts"]; runs += 1
+                    t_run = r["ts"]
                 elif r["ev"] == "stop":
-                    d = r.get("ran_s")
-                    if d is None and t_open is not None:
-                        d = r["ts"] - t_open
-                    if d:
-                        active += d; longest = max(longest, d)
-                    t_open = None
-            if t_open is not None:            # still running right now
-                d = time.time() - t_open
-                active += d; longest = max(longest, d)
+                    end_ts = r["ts"]
+                    begin = end_ts - r["ran_s"] if r.get("ran_s") else t_run
+                    if begin is not None:
+                        intervals.append((max(begin, cutoff), end_ts))
+                    t_run = None
+            if t_run is not None:              # still running right now
+                intervals.append((max(t_run, cutoff), now_ts))
+
+            active    = sum(open_overlap(a, b) for a, b in intervals)
+            open_runs = [b - a for a, b in intervals if open_overlap(a, b) > 0]
+            denom     = open_overlap(cutoff, now_ts)
             self.send_json({
                 "events": events[-60:], "active_s": round(active),
-                "runs": runs, "longest_s": round(longest),
-                "window_h": hours, "running": osc_engine.running,
-                "pct": round(100*active/(hours*3600), 1),
+                "runs": len(open_runs),
+                "longest_s": round(max(open_runs, default=0.0)),
+                "window_h": hours, "open_hours": [OPEN_FROM, OPEN_TO],
+                "open_s": round(denom), "running": osc_engine.running,
+                "pct": round(100*active/denom, 1) if denom > 0 else 0.0,
             })
             return
 
