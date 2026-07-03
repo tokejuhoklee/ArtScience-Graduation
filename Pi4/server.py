@@ -262,6 +262,8 @@ class SafetyMonitor:
         self.room_frac        = 0.0    # live background-diff across the whole frame
         self.last_activity_t  = time.time()
         self._ref_full        = None   # full-frame background captured at arm time
+        self._prev_small      = None   # previous frame, for micro-motion detection
+        self._last_motion_t   = time.time()   # gates ghost recovery (see process)
         self._upper_hits      = 0      # consecutive frames of approach presence
         self._hold_start_until= 0.0    # refractory after parking
         self._tl_resume_offset= 0.0    # continue the show here on next approach
@@ -313,12 +315,14 @@ class SafetyMonitor:
 
     # Adaptive background: pixels that match the background keep blending
     # toward the current frame, so gradual lighting drift (weather, day/night)
-    # never invalidates the reference; pixels that differ (a person) are
-    # frozen so they can't be absorbed. The much slower recovery rate on
-    # differing pixels self-heals a sudden lighting step (lights switched,
-    # passing cloud) in ~15 min. Re-arm still re-baselines instantly.
+    # never invalidates the reference. Pixels that differ (a person) are only
+    # re-absorbed once the room has been MOTION-quiet for RECOVER_QUIET_S —
+    # a watching audience micro-moves constantly, so it is never absorbed,
+    # while a lighting-step ghost in an empty room heals in ~2 min.
     BG_ALPHA_MATCH   = 0.001     # matched pixels: τ ≈ 50 s at 20 fps
-    BG_ALPHA_RECOVER = 0.00006   # differing pixels: τ ≈ 14 min at 20 fps
+    BG_ALPHA_RECOVER = 0.0005    # differing pixels, motion-quiet room only
+    RECOVER_QUIET_S  = 30.0      # no motion for this long before recovery runs
+    MOTION_THR       = 15        # per-pixel frame-to-frame motion threshold
 
     def process(self, gray):
         if not self.armed or cv2 is None:
@@ -330,35 +334,57 @@ class SafetyMonitor:
             with self._lock:
                 if self._ref_full is None or self._ref_full.shape != small.shape:
                     self._ref_full = small.astype(np.float32)   # baseline capture
+                    self._prev_small = small
                     return
                 refarr = self._ref_full          # local handle: safe vs re-arm race
                 thr, min_frac = self.diff_thresh, self.min_area_frac
 
+            now = time.time()
             full_diff = cv2.absdiff(small, cv2.convertScaleAbs(refarr))
-            fm = cv2.threshold(full_diff, thr, 255, cv2.THRESH_BINARY)[1]
+            # Danger mask keeps the strict threshold (false trips are costly);
+            # presence gets half of it — still, low-contrast people were falling
+            # below the strict one, which made activation look motion-based.
+            fm_d = cv2.threshold(full_diff, thr, 255, cv2.THRESH_BINARY)[1]
+            fm_p = cv2.threshold(full_diff, max(10, thr // 2), 255,
+                                 cv2.THRESH_BINARY)[1]
 
-            # Conservative background update (rates above): adapt where the
-            # scene matches; barely adapt foreground and a halo around it.
-            fg_area = cv2.dilate(fm, None, iterations=2)
-            cv2.accumulateWeighted(small, refarr, self.BG_ALPHA_MATCH,
-                                   mask=cv2.bitwise_not(fg_area))
-            cv2.accumulateWeighted(small, refarr, self.BG_ALPHA_RECOVER,
-                                   mask=fg_area)
+            # Frame-to-frame motion: a watching audience shifts constantly even
+            # when "standing still" — motion counts as activity too, and gates
+            # the background recovery below.
+            mo_room = mo_upper = 0.0
+            if self._prev_small is not None and self._prev_small.shape == small.shape:
+                mm = cv2.threshold(cv2.absdiff(small, self._prev_small),
+                                   self.MOTION_THR, 255, cv2.THRESH_BINARY)[1]
+                my = int(self.trip_y * mm.shape[0])
+                m_up = mm[:my, :] if self.danger_below else mm[my:, :]
+                mo_room  = cv2.countNonZero(mm) / max(1, mm.size)
+                mo_upper = cv2.countNonZero(m_up) / max(1, m_up.size)
+                if mo_room > 0.002:
+                    self._last_motion_t = now
+            self._prev_small = small
 
-            # Presence: the approach zone is the mirror of the danger zone —
-            # same background difference, opposite side of the line. A person
-            # standing still keeps counting; empty room = frame matches bg.
-            fy = int(self.trip_y * fm.shape[0])
-            upper = fm[:fy, :] if self.danger_below else fm[fy:, :]
-            self.room_frac  = cv2.countNonZero(fm) / max(1, fm.size)
-            self.upper_frac = cv2.countNonZero(upper) / max(1, upper.size)
+            # Presence = background difference OR motion, per zone
+            fy = int(self.trip_y * fm_p.shape[0])
+            upper = fm_p[:fy, :] if self.danger_below else fm_p[fy:, :]
+            self.room_frac  = max(cv2.countNonZero(fm_p) / max(1, fm_p.size), mo_room)
+            self.upper_frac = max(cv2.countNonZero(upper) / max(1, upper.size), mo_upper)
             if self.room_frac > self.presence_thresh:
-                self.last_activity_t = time.time()
+                self.last_activity_t = now
             self._upper_hits = (self._upper_hits + 1
                                 if self.upper_frac > self.presence_thresh else 0)
 
-            # Danger zone: crop of the same mask (+ whip exclude box), dilated
-            reg  = self._region(fm)
+            # Background update: matched pixels always adapt (lighting drift);
+            # differing pixels recover only in a motion-quiet room, so people
+            # are never absorbed while they watch.
+            fg_area = cv2.dilate(fm_p, None, iterations=2)
+            cv2.accumulateWeighted(small, refarr, self.BG_ALPHA_MATCH,
+                                   mask=cv2.bitwise_not(fg_area))
+            if now - self._last_motion_t > self.RECOVER_QUIET_S:
+                cv2.accumulateWeighted(small, refarr, self.BG_ALPHA_RECOVER,
+                                       mask=fg_area)
+
+            # Danger zone: crop of the strict mask (+ whip exclude box), dilated
+            reg  = self._region(fm_d)
             mask = cv2.dilate(reg, None, iterations=2)
             self.fg_frac = cv2.countNonZero(mask) / max(1, reg.size)
             clear = self.fg_frac <= min_frac
