@@ -136,6 +136,9 @@ void setMotorEnabled(bool on) {
 }
 
 void scheduleSteps(long steps) {
+  parkPending = false;   // any new motion supersedes a pending park — otherwise
+                         // an interrupted park de-energizes mid-run at the first
+                         // idle instant, and the off/on flap shifts the centre
   if (steps == 0) return;
 
   if (!motorEnabled) {
@@ -180,6 +183,8 @@ void emergencyStop() {
   noInterrupts();
   stepsRemaining = 0;
   interrupts();
+  parkPending = false;   // a stop cancels a park-in-progress — otherwise the
+                         // stale flag de-energizes mid-run at the wrong spot
   printLog("EMERGENCY STOP");
 }
 
@@ -254,7 +259,8 @@ void handleSerialCommands() {
 
         // Commands
         if (cmd == "on") {
-          setMotorEnabled(true); 
+          parkPending = false;
+          setMotorEnabled(true);
         }
         else if (cmd == "off") { 
           setMotorEnabled(false); 
@@ -405,10 +411,12 @@ void handleSerialCommands() {
         }
         else if (cmd == "park") {
           // Go to neutral, then de-energize (loop finishes it). Leaves the
-          // driver commanded at 0 so re-enable returns here.
+          // driver commanded at 0 so re-enable returns here. parkPending is
+          // set AFTER the move — scheduleSteps clears it (new motion cancels
+          // a pending park).
           if (!motorEnabled) setMotorEnabled(true);
-          parkPending = true;
           smartMoveTo(0);
+          parkPending = true;
           printLog("Parking to neutral...");
         }
         else if (cmd == "status") {

@@ -267,6 +267,9 @@ class SafetyMonitor:
         self._upper_hits      = 0      # consecutive frames of approach presence
         self._hold_start_until= 0.0    # refractory after parking
         self._tl_resume_offset= 0.0    # continue the show here on next approach
+        self.presence_hold    = False  # manual stop: don't auto-start while the
+                                       # operator is in the room; clears once the
+                                       # room empties (or presence is re-toggled)
         self._lock         = threading.Lock()
         self._load()
 
@@ -279,7 +282,9 @@ class SafetyMonitor:
             if "auto_resume" in d:   self.auto_resume = bool(d["auto_resume"])
             if "resume_delay" in d:  self.resume_delay = max(0.0, min(60.0, float(d["resume_delay"])))
             if "arm_on_boot" in d:   self.arm_on_boot = bool(d["arm_on_boot"])
-            if "presence_enabled" in d: self.presence_enabled = bool(d["presence_enabled"])
+            if "presence_enabled" in d:
+                self.presence_enabled = bool(d["presence_enabled"])
+                self.presence_hold = False   # toggling re-arms autonomy
             if "presence_thresh" in d:  self.presence_thresh = max(0.002, min(0.3, float(d["presence_thresh"])))
             if "idle_timeout" in d:     self.idle_timeout = max(5.0, min(900.0, float(d["idle_timeout"])))
             if any(k in d for k in ("trip_y", "danger_below", "exclude")):
@@ -435,6 +440,13 @@ class SafetyMonitor:
             else:
                 self.presence_state = "playing"
         else:
+            if self.presence_hold:
+                # Manually stopped with people (the operator) still in the room:
+                # stay quiet. Autonomy resumes once the room has emptied.
+                if now - self.last_activity_t > self.idle_timeout:
+                    self.presence_hold = False
+                self.presence_state = "held (manual stop)"
+                return
             self.presence_state = "waiting"
             if now < self._hold_start_until:
                 return
@@ -503,6 +515,7 @@ class SafetyMonitor:
             "presence_thresh": self.presence_thresh,
             "idle_timeout": self.idle_timeout,
             "presence_state": self.presence_state,
+            "presence_hold": self.presence_hold,
             "upper": round(self.upper_frac, 4), "room": round(self.room_frac, 4),
             "fg": round(self.fg_frac, 4), "cv": cv2 is not None,
         }
@@ -1004,6 +1017,12 @@ class OscillatorEngine:
                 # in exactly one tick, so the motor glides instead of dashing and
                 # idling. The user's speed slider is the upper bound.
                 cap = max(self.MIN_SPS, min(self.MAX_SPS, int(p.get('speed', 2250))))
+                # Gentle spin-up: ramp the speed ceiling over the first 1.5 s so
+                # (re)starts glide to the target — presence restarts resume
+                # mid-piece and were slamming 0→target at full cap (jolts that
+                # also strain the mount and the driver's tracking).
+                if t < 1.5:
+                    cap = int(self.MIN_SPS + (cap - self.MIN_SPS) * (t / 1.5))
                 if last_steps is None:
                     target_sps = cap        # first move: go at full cap to seed
                 else:
@@ -1364,6 +1383,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/cmd":
             cmd = qs.get("c", [""])[0].strip()
             if cmd:
+                # Manual hands-on control: hold presence auto-start until the
+                # room next empties, so the FSM doesn't fight the operator.
+                if cmd.lower().split()[0] in ("stop", "off", "park", "reset", "left",
+                                              "right", "neutral", "move", "offset",
+                                              "cw", "ccw", "calibrate"):
+                    safety.presence_hold = True
                 # stop/off/reset must also kill the sequence engine,
                 # otherwise it immediately re-issues movement commands
                 if cmd.lower() in ("stop", "off", "reset"):
@@ -1418,6 +1443,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/osc/start":
+            safety.presence_hold = False   # manual run: autonomy continues after
             osc_engine.start(data, _event_loop)
             self.send_json({"ok": True})
             return
@@ -1428,7 +1454,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/osc/stop":
-            osc_engine.stop()
+            safety.presence_hold = True    # manual stop: don't auto-restart
+            osc_engine.stop()              # while the operator is in the room
             self.send_json({"ok": True})
             return
 

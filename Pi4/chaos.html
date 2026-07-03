@@ -664,6 +664,17 @@ function loadPresetsFromStorage() {
       if (d.presets && Object.keys(d.presets).length)   presets  = d.presets;
       if (Array.isArray(d.timeline) && d.timeline.length) timeline = d.timeline;
       if (typeof d.loop === 'boolean') loopTimeline = d.loop;
+      // Motor settings: the server bundle is the source of truth, so centre/
+      // limit/speed agree across devices (they were per-browser before).
+      if (d.motor) {
+        if (d.motor.limit  !== undefined) setSliderVal('mlimit',  d.motor.limit);
+        if (d.motor.speed  !== undefined) setSliderVal('mspd',    d.motor.speed);
+        if (d.motor.center !== undefined) {
+          setSliderVal('mcenter', d.motor.center);
+          try { localStorage.setItem(CENTER_KEY, String(d.motor.center)); } catch {}
+        }
+        refreshAmpLimits();
+      }
       try {
         localStorage.setItem(PRESETS_KEY, JSON.stringify(presets));
         localStorage.setItem(TIMELINE_KEY, JSON.stringify(timeline));
