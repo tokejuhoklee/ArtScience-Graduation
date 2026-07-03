@@ -192,6 +192,43 @@ camera_mgr = CameraManager()
 # an optional ignore box. Fail-safe: stale frame or detector error -> trip.
 SAFETY_CONFIG = Path(__file__).parent / "safety_config.json"
 
+# ── Show log ──────────────────────────────────────────────────────────────────
+# Privacy-clean activity journal: timestamps of start/stop transitions only
+# (no images, no counts). Lets the user see active vs. empty time and spot
+# overheating-length runs. Appends JSONL to show_log.jsonl.
+SHOW_LOG = Path(__file__).parent / "show_log.jsonl"
+
+class ShowLog:
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.reason = None         # set by the actor right before a start/stop
+        self._run_started = None   # wall time the current run began
+
+    def log(self, ev, **kw):
+        rec = {"t": time.strftime("%Y-%m-%d %H:%M:%S"),
+               "ts": round(time.time(), 1), "ev": ev, **kw}
+        try:
+            with self._lock:
+                with SHOW_LOG.open("a") as f:
+                    f.write(json.dumps(rec) + "\n")
+        except Exception as e:
+            print(f"Show log error: {e}")
+
+    def tick(self, running):
+        """Called from the broadcast loop — logs run/stop transitions with the
+        reason the responsible code path set just beforehand."""
+        if running and self._run_started is None:
+            self._run_started = time.time()
+            self.log("start", why=self.reason or "manual")
+            self.reason = None
+        elif not running and self._run_started is not None:
+            dur = round(time.time() - self._run_started, 1)
+            self._run_started = None
+            self.log("stop", why=self.reason or "manual", ran_s=dur)
+            self.reason = None
+
+show_log = ShowLog()
+
 class SafetyMonitor:
     STALE_S = 1.0   # no fresh frame this long while armed -> trip
 
@@ -361,6 +398,7 @@ class SafetyMonitor:
         if osc_engine.running:
             if now - self.last_activity_t > self.idle_timeout:
                 print("Presence: room idle — parking")
+                show_log.reason = "room empty"
                 if osc_engine.tl_active:   # remember where the show was —
                     self._tl_resume_offset = osc_engine.tl_elapsed
                 osc_engine.stop()          # — it continues there next approach
@@ -379,6 +417,7 @@ class SafetyMonitor:
                 if bundle.get('timeline'):
                     print(f"Presence: approach — resuming timeline at "
                           f"{self._tl_resume_offset:.1f}s")
+                    show_log.reason = "approach"
                     self._upper_hits = 0
                     self.last_activity_t = now
                     osc_engine.start({'mode': 'timeline',
@@ -401,6 +440,7 @@ class SafetyMonitor:
             # closed-loop driver's reference from the Pico's and can shift the
             # swing into the pillar. osc_engine.stop() halts motion but the motor
             # keeps holding position, so the zero stays valid through a trip.
+            show_log.reason = f"safety: {reason}"
             osc_engine.stop()
         except Exception as e:
             print(f"Safety trip stop error: {e}")
@@ -419,6 +459,7 @@ class SafetyMonitor:
                 for k in ('center', 'speed', 'limit'):
                     if k in osc_engine.params:
                         params[k] = osc_engine.params[k]
+                show_log.reason = "zone clear"
                 osc_engine.start(params, _event_loop)
                 print("Safety: zone clear — motion resumed")
             except Exception as e:
@@ -995,6 +1036,7 @@ async def broadcast_loop():
     while True:
         safety.check_stale()     # fail-safe: trip if the camera feed went stale
         safety.presence_tick()   # attract mode: start on approach / park on idle
+        show_log.tick(osc_engine.running)   # journal run/stop transitions
         lines = serial_mgr.read_available()
         msg = json.dumps({
             "lines": lines,
@@ -1242,6 +1284,48 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(safety.state())
             return
 
+        if path == "/api/showlog":
+            # Activity summary over the last N hours (?h=24): events + how much
+            # of the window the show was running. Timestamps only — no images.
+            try:
+                hours = max(0.1, min(24*30, float(qs.get("h", ["24"])[0])))
+            except ValueError:
+                hours = 24.0
+            cutoff = time.time() - hours*3600
+            events = []
+            try:
+                if SHOW_LOG.exists():
+                    for line in SHOW_LOG.read_text().splitlines():
+                        try:
+                            r = json.loads(line)
+                            if r.get("ts", 0) >= cutoff:
+                                events.append(r)
+                        except Exception:
+                            pass
+            except Exception as e:
+                print(f"Show log read error: {e}")
+            active = 0.0; runs = 0; longest = 0.0; t_open = None
+            for r in events:
+                if r["ev"] == "start":
+                    t_open = r["ts"]; runs += 1
+                elif r["ev"] == "stop":
+                    d = r.get("ran_s")
+                    if d is None and t_open is not None:
+                        d = r["ts"] - t_open
+                    if d:
+                        active += d; longest = max(longest, d)
+                    t_open = None
+            if t_open is not None:            # still running right now
+                d = time.time() - t_open
+                active += d; longest = max(longest, d)
+            self.send_json({
+                "events": events[-60:], "active_s": round(active),
+                "runs": runs, "longest_s": round(longest),
+                "window_h": hours, "running": osc_engine.running,
+                "pct": round(100*active/(hours*3600), 1),
+            })
+            return
+
         if path.startswith("/api/sequences/"):
             name = path.split("/api/sequences/")[1]
             f = SEQUENCES_DIR / f"{name}.json"
@@ -1402,6 +1486,7 @@ async def main():
     global _event_loop
     _event_loop = asyncio.get_event_loop()
 
+    show_log.log("boot")   # restarts are context for gaps in the journal
     serial_mgr.connect()
 
     # Auto-start a named sequence on boot (if it exists)

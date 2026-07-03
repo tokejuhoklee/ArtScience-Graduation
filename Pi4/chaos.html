@@ -419,6 +419,17 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
     </div>
 
     <div class="card">
+      <span class="card-label">Activity (last 24h)</span>
+      <div style="font-size:11px;color:#c8c8e8" id="showlog-summary">–</div>
+      <div id="showlog-list" style="font-size:9px;color:#4a4a6a;line-height:1.8;
+        max-height:140px;overflow-y:auto;margin-top:4px"></div>
+      <div class="btn" onclick="loadShowLog()" style="margin-top:6px;padding:7px;font-size:10px">↻ Refresh</div>
+      <div style="font-size:9px;color:#4a4a6a;margin-top:2px">
+        timestamps of start/park/pause only — no images, no counting
+      </div>
+    </div>
+
+    <div class="card">
       <span class="card-label">Status: <span id="saf-status">disarmed</span></span>
       <div class="btn-row">
         <div class="btn run" id="saf-arm" onclick="armSafety()">● Arm</div>
@@ -1775,6 +1786,28 @@ function openSafety() {
     .then(r => r.ok ? r.json() : null)
     .then(s => { if (s) applySafetyState(s, true); })
     .catch(()=>{});
+  loadShowLog();
+}
+
+// Activity journal: how much of the last 24h the show was running.
+async function loadShowLog() {
+  try {
+    const r = await fetch(`${BASE}/api/showlog?h=24`, {signal:AbortSignal.timeout(4000)});
+    if (!r.ok) return;
+    const d = await r.json();
+    const hm = s => {
+      s = Math.round(s);
+      const h = Math.floor(s/3600), m = Math.floor((s%3600)/60);
+      return h ? `${h}h ${m}m` : (m ? `${m}m ${s%60}s` : `${s}s`);
+    };
+    ge('showlog-summary').textContent =
+      `active ${hm(d.active_s)} (${d.pct}% of 24h) · ${d.runs} activation${d.runs===1?'':'s'}` +
+      ` · longest ${hm(d.longest_s)}${d.running ? ' · running now' : ''}`;
+    ge('showlog-list').innerHTML = (d.events || []).slice().reverse().map(e =>
+      `<div>${(e.t||'').slice(5,16)} — <span style="color:${e.ev==='start'?'#3ccc7c':e.ev==='boot'?'#7c5cfc':'#9c9cc0'}">${e.ev}</span>` +
+      `${e.why ? ` (${e.why})` : ''}${e.ran_s ? ` · ran ${hm(e.ran_s)}` : ''}</div>`).join('')
+      || '<div>no events yet</div>';
+  } catch {}
 }
 
 // Reflect server state in the UI. `full` also syncs the controls (used on open).
