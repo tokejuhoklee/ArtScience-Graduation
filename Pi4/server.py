@@ -983,10 +983,13 @@ class OscillatorEngine:
                         if seg['mode'] == 'chaos':
                             self._reseed = True   # fresh ICs each (re)entry — no taper
                     tl['prev_e'] = e
+                    # Motor settings: bundle values at start, but live slider
+                    # pushes (osc/update) override — so Centre/Limit/Speed stay
+                    # adjustable while a server-driven show is playing.
                     p = {**seg,
-                         'limit':  tl['motor'].get('limit', 140),
-                         'speed':  tl['motor'].get('speed', 2250),
-                         'center': tl['motor'].get('center', 0.0)}
+                         'limit':  self.params.get('limit',  tl['motor'].get('limit', 140)),
+                         'speed':  self.params.get('speed',  tl['motor'].get('speed', 2250)),
+                         'center': self.params.get('center', tl['motor'].get('center', 0.0))}
 
                 # Mode can change tick-to-tick (timeline sequencing sine↔chaos)
                 mode = p.get('mode', init_mode)
