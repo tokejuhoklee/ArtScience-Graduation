@@ -247,6 +247,7 @@ class SafetyMonitor:
         self.fg_frac       = 0.0     # current foreground fraction (for UI tuning)
         self.last_frame_t  = 0.0
         self._clear_since  = None    # when the zone first became clear (while tripped)
+        self._trip_at      = 0.0     # when the last trip fired (settle gate)
         self._was_running  = False   # was the oscillator running at trip time
         self._resume_params= None    # params to restart with on auto-resume
         # Presence (attract) mode: start the stored timeline as soon as the
@@ -397,11 +398,14 @@ class SafetyMonitor:
                 if not clear:
                     self._trip("intrusion")
             elif self.auto_resume:
-                # tripped: resume once the zone has stayed clear long enough
+                # tripped: resume once the zone has stayed clear long enough —
+                # and no sooner than 5s after the trip, so the dropped arm has
+                # settled at rest before the wake-up re-zero fires
                 if clear:
                     if self._clear_since is None:
                         self._clear_since = time.time()
-                    elif time.time() - self._clear_since >= self.resume_delay:
+                    elif (time.time() - self._clear_since >= self.resume_delay
+                          and time.time() - self._trip_at >= 5.0):
                         self._resume()
                 else:
                     self._clear_since = None
@@ -474,12 +478,14 @@ class SafetyMonitor:
             # continues from where it was interrupted, not from the beginning.
             if self._resume_params and self._resume_params.get('mode') == 'timeline':
                 self._resume_params['tl_offset'] = osc_engine.tl_elapsed
-            # Hold (energized), don't de-energize: an off/on cycle decouples the
-            # closed-loop driver's reference from the Pico's and can shift the
-            # swing into the pillar. osc_engine.stop() halts motion but the motor
-            # keeps holding position, so the zero stays valid through a trip.
+            # De-energize on trip: the whip drops limp (compliant — safer near a
+            # person, and it reads as intentional). The arm settles at gravity
+            # rest, and the firmware re-zeros there on the next enable
+            # (REST_RECAL_MS), so every trip now re-centres instead of drifting.
             show_log.reason = f"safety: {reason}"
             osc_engine.stop()
+            serial_mgr.send("off")
+            self._trip_at = time.time()
         except Exception as e:
             print(f"Safety trip stop error: {e}")
         print(f"!! SAFETY TRIP: {reason}")

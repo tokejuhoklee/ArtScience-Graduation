@@ -126,7 +126,22 @@ unsigned long speedToIntervalMicros(int stepsPerSec) {
 //
 // === MOTOR CONTROL ===
 //
+// After this long de-energized, the arm has settled at gravity rest and the
+// driver re-references there on enable (user-verified: off → settle →
+// calibrate → resume keeps the centre). So a long-off wake re-zeros at rest —
+// the manual recipe, automated at the single choke point every path uses.
+const unsigned long REST_RECAL_MS = 4000;
+unsigned long motorOffAt = 0;
+
 void setMotorEnabled(bool on) {
+  if (on && !motorEnabled && motorOffAt != 0 &&
+      (millis() - motorOffAt) >= REST_RECAL_MS) {
+    currentPosition = 0;
+    currentTarget   = 0;
+    appliedDir      = -1;
+    printLog("Re-zeroed at rest (off > 4s)");
+  }
+  if (!on && motorEnabled) motorOffAt = millis();
   motorEnabled = on;
   if (ENABLE_PIN >= 0) {
     bool pinState = ENABLE_ACTIVE_HIGH ? on : !on;
