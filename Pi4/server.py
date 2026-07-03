@@ -399,13 +399,15 @@ class SafetyMonitor:
                     self._trip("intrusion")
             elif self.auto_resume:
                 # tripped: resume once the zone has stayed clear long enough —
-                # and no sooner than 5s after the trip, so the dropped arm has
-                # settled at rest before the wake-up re-zero fires
+                # and no sooner than 8s after the trip. A trip DROPS the arm
+                # mid-swing; the wake-up re-zero is only correct once it hangs
+                # still, and 8s is the settle time boot-home has proven out
+                # (5s left it swaying -> re-zeroed off-centre after pauses).
                 if clear:
                     if self._clear_since is None:
                         self._clear_since = time.time()
                     elif (time.time() - self._clear_since >= self.resume_delay
-                          and time.time() - self._trip_at >= 5.0):
+                          and time.time() - self._trip_at >= 8.0):
                         self._resume()
                 else:
                     self._clear_since = None
