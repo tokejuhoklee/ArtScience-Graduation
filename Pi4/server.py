@@ -267,6 +267,7 @@ class SafetyMonitor:
         self._last_motion_t   = time.time()   # gates ghost recovery (see process)
         self._upper_hits      = 0      # consecutive frames of approach presence
         self._hold_start_until= 0.0    # refractory after parking
+        self._not_running_since = None # engine-idle debounce (restart gaps)
         self._tl_resume_offset= 0.0    # continue the show here on next approach
         self.presence_hold    = False  # manual stop: don't auto-start while the
                                        # operator is in the room; clears once the
@@ -433,6 +434,7 @@ class SafetyMonitor:
             return
         now = time.time()
         if osc_engine.running:
+            self._not_running_since = None
             if now - self.last_activity_t > self.idle_timeout:
                 print("Presence: room idle — parking")
                 show_log.reason = "room empty"
@@ -453,6 +455,13 @@ class SafetyMonitor:
                     self.presence_hold = False
                 self.presence_state = "held (manual stop)"
                 return
+            # Debounce: only consider starting once the engine has been idle
+            # a full second — restart gaps must not read as "show ended".
+            if self._not_running_since is None:
+                self._not_running_since = now
+            if now - self._not_running_since < 1.0:
+                self.presence_state = "waiting"
+                return
             self.presence_state = "waiting"
             if now < self._hold_start_until:
                 return
@@ -467,6 +476,8 @@ class SafetyMonitor:
                     osc_engine.start({'mode': 'timeline',
                                       'tl_offset': self._tl_resume_offset},
                                      _event_loop)
+                    self._hold_start_until = now + 3.0   # one start, then patience
+                    self._not_running_since = None
                     self.presence_state = "playing"
 
     def _trip(self, reason):
@@ -892,6 +903,9 @@ class OscillatorEngine:
     def start(self, params: dict, event_loop):
         self._gen += 1
         gen = self._gen
+        # Held true across the restart gap (cancel -> new task), so watchers
+        # (presence FSM, activity log) don't see a phantom stop and react to it
+        self.running = True
         if self._task and not self._task.done():
             self._task.cancel()
         engine.stop()              # silence sequence engine if running
