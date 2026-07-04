@@ -301,6 +301,8 @@ class SafetyMonitor:
         self.min_area_frac = 0.03    # foreground fraction of danger zone to trip
         self.diff_thresh   = 25      # per-pixel grayscale diff threshold
         self.exclude       = None    # whip ignore box [x0,y0,x1,y1] fractions, or None
+        self.ignore        = None    # presence ignore box (work corner) — blanked
+                                     # from presence/motion, NEVER from danger
         self.auto_resume   = True    # restart motion once the zone clears
         self.resume_delay  = 3.0     # zone must stay clear this long before resuming
         self.arm_on_boot   = True    # arm automatically when the server starts
@@ -342,6 +344,10 @@ class SafetyMonitor:
             if "danger_below" in d:  self.danger_below = bool(d["danger_below"])
             if "min_area_frac" in d: self.min_area_frac = max(0.005, min(0.5, float(d["min_area_frac"])))
             if "exclude" in d:       self.exclude = d["exclude"]
+            if "ignore" in d:
+                v = d["ignore"]
+                self.ignore = ([max(0.0, min(1.0, float(x))) for x in v[:4]]
+                               if isinstance(v, (list, tuple)) and len(v) >= 4 else None)
             if "auto_resume" in d:   self.auto_resume = bool(d["auto_resume"])
             if "resume_delay" in d:  self.resume_delay = max(0.0, min(60.0, float(d["resume_delay"])))
             if "arm_on_boot" in d:   self.arm_on_boot = bool(d["arm_on_boot"])
@@ -416,6 +422,13 @@ class SafetyMonitor:
             fm_d = cv2.threshold(full_diff, thr, 255, cv2.THRESH_BINARY)[1]
             fm_p = cv2.threshold(full_diff, max(10, thr // 2), 255,
                                  cv2.THRESH_BINARY)[1]
+            # Presence ignore box (e.g. the artist's work corner): blanked from
+            # the presence mask — the danger mask below is untouched, so the
+            # safety trip still covers that area.
+            if self.ignore:
+                ph, pw = fm_p.shape[:2]
+                fm_p[int(self.ignore[1]*ph):int(self.ignore[3]*ph),
+                     int(self.ignore[0]*pw):int(self.ignore[2]*pw)] = 0
 
             # Frame-to-frame motion: a watching audience shifts constantly even
             # when "standing still" — motion counts as activity too, and gates
@@ -424,6 +437,10 @@ class SafetyMonitor:
             if self._prev_small is not None and self._prev_small.shape == small.shape:
                 mm = cv2.threshold(cv2.absdiff(small, self._prev_small),
                                    self.MOTION_THR, 255, cv2.THRESH_BINARY)[1]
+                if self.ignore:
+                    mh, mw = mm.shape[:2]
+                    mm[int(self.ignore[1]*mh):int(self.ignore[3]*mh),
+                       int(self.ignore[0]*mw):int(self.ignore[2]*mw)] = 0
                 my = int(self.trip_y * mm.shape[0])
                 m_up = mm[:my, :] if self.danger_below else mm[my:, :]
                 mo_room  = cv2.countNonZero(mm) / max(1, mm.size)
@@ -596,6 +613,7 @@ class SafetyMonitor:
             "armed": self.armed, "tripped": self.tripped, "reason": self.trip_reason,
             "trip_y": self.trip_y, "danger_below": self.danger_below,
             "min_area_frac": self.min_area_frac, "exclude": self.exclude,
+            "ignore": self.ignore,
             "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
             "arm_on_boot": self.arm_on_boot,
             "presence_enabled": self.presence_enabled,
@@ -612,6 +630,7 @@ class SafetyMonitor:
             SAFETY_CONFIG.write_text(json.dumps({
                 "trip_y": self.trip_y, "danger_below": self.danger_below,
                 "min_area_frac": self.min_area_frac, "exclude": self.exclude,
+                "ignore": self.ignore,
                 "auto_resume": self.auto_resume, "resume_delay": self.resume_delay,
                 "arm_on_boot": self.arm_on_boot,
                 "presence_enabled": self.presence_enabled,
@@ -629,6 +648,7 @@ class SafetyMonitor:
                 self.danger_below = d.get("danger_below", self.danger_below)
                 self.min_area_frac = d.get("min_area_frac", self.min_area_frac)
                 self.exclude = d.get("exclude", self.exclude)
+                self.ignore = d.get("ignore", self.ignore)
                 self.auto_resume = d.get("auto_resume", self.auto_resume)
                 self.resume_delay = d.get("resume_delay", self.resume_delay)
                 self.arm_on_boot = d.get("arm_on_boot", self.arm_on_boot)
@@ -1020,13 +1040,15 @@ class OscillatorEngine:
                 'loop':     bool(b.get('loop', False)),
                 'motor':    b.get('motor', {}) or {},
                 'offset':   float(initial_params.get('tl_offset', 0.0) or 0.0),
-                'prev_idx': -1, 'prev_e': -1.0,
+                'prev_idx': -1, 'prev_e': -1.0, 'reload_at': 0.0,
             }
             tl['total'] = sum(float(it.get('duration', 5) or 5) for it in tl['timeline'])
             if not tl['timeline'] or tl['total'] <= 0:
                 print("Timeline: nothing stored to play")
                 self.running = False
                 return
+            if not tl['loop'] and tl['offset'] >= tl['total']:
+                tl['offset'] = 0.0   # a finished (non-loop) show restarts from the top
             self.tl_active = True
             self.tl_count  = len(tl['timeline'])
 
@@ -1066,6 +1088,17 @@ class OscillatorEngine:
                 p   = self.params
 
                 if tl:   # server-driven timeline: compute this tick's params
+                    if now >= tl['reload_at']:   # live edits: loop toggle, steps, motor
+                        b2 = load_show_bundle()
+                        t2 = b2.get('timeline', []) or []
+                        if t2:
+                            tl['presets']  = b2.get('presets', {}) or {}
+                            tl['timeline'] = t2
+                            tl['loop']     = bool(b2.get('loop', False))
+                            tl['motor']    = b2.get('motor', {}) or {}
+                            tl['total']    = sum(float(it.get('duration', 5) or 5) for it in t2)
+                            self.tl_count  = len(t2)
+                        tl['reload_at'] = now + 5.0
                     e = tl['offset'] + (now - t0)
                     e = (e % tl['total']) if tl['loop'] else min(e, tl['total'])
                     self.tl_elapsed = e

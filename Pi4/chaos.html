@@ -353,6 +353,11 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
           <rect id="ovl-danger" x="0" y="55" width="100" height="45" fill="rgba(220,60,60,0.18)"/>
           <line id="ovl-line" x1="0" y1="55" x2="100" y2="55" stroke="#fc4c4c" stroke-width="0.8"/>
           <rect id="ovl-grab" x="0" y="51" width="100" height="8" fill="transparent" style="cursor:row-resize"/>
+          <rect id="ovl-ignore" x="3" y="3" width="25" height="30" fill="rgba(124,92,252,0.16)"
+            stroke="#9c7cff" stroke-width="0.5" stroke-dasharray="2,1.5"
+            style="cursor:move;display:none"/>
+          <rect id="ovl-ignore-hd" x="24" y="29" width="4" height="5" fill="#9c7cff"
+            style="cursor:nwse-resize;display:none"/>
         </svg>
       </div>
       <div style="font-size:9px;color:#4a4a6a;margin-top:4px">
@@ -373,6 +378,14 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
       </div>
       <div style="font-size:9px;color:#4a4a6a;padding:0 0 2px 52px">
         min share of the zone that must change to trip · live: <span id="saf-fg">0%</span>
+      </div>
+      <div class="tog-row" style="margin-top:4px">
+        <span>Ignore zone (work corner)</span>
+        <div class="tog" id="tog-ignore" onclick="this.classList.toggle('on'); toggleIgnore()"></div>
+      </div>
+      <div style="font-size:9px;color:#4a4a6a">
+        drag the dashed box over your corner — presence ignores it, the
+        danger zone still trips there
       </div>
     </div>
 
@@ -900,6 +913,9 @@ function connectWS() {
             const now = ge('tl-now');
             now.textContent = `${tripped ? '⏸' : '▶'} ${st.name} (${st.idx+1}/${st.count})`;
             now.style.display = '';
+            const items = ge('timeline-list').children;
+            for (let i = 0; i < items.length; i++)
+              if (items[i].classList) items[i].classList.toggle('active', i === st.idx);
           } else if (serverTl && !d.osc.tl && !activeTimeline) {
             serverTl = false;
             ge('tl-now').style.display = 'none';
@@ -1655,25 +1671,39 @@ function buildParams() {
 }
 
 async function doRun() {
-  // Run the timeline if the Timeline tab is showing and has items
-  activeTimeline = (tab === 'timeline' && timeline.length > 0);
-
-  runT0 = Date.now();
   tlPausedAt = null;
-  oscPhase1 = oscPhase2 = 0;   // clean centered start, matching the server
-  if (activeTimeline) applyTimelineFrame();   // seed sliders/mode from first segment
-  if (mode==='chaos' || activeTimeline) {
-    resetChaos();
+
+  // Timeline playback is SERVER-side: push the current bundle, then hand the
+  // show to the engine. Progression and looping must not depend on this page
+  // staying open (the old browser-driven pushing froze when the tab closed).
+  if (tab === 'timeline' && timeline.length > 0) {
+    activeTimeline = false;   // the server owns playback; this page just watches
+    try {
+      await fetch(`${BASE}/api/presets`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({presets, timeline, loop: loopTimeline,
+          motor: {limit: motorLimit(), speed: maxSps(), center: motorCenter()}}),
+        signal:AbortSignal.timeout(4000),
+      });
+      await fetch(`${BASE}/api/osc/start`,{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({mode:'timeline', tl_offset: 0}),
+        signal:AbortSignal.timeout(4000),
+      });
+    } catch(e){ console.warn(e); }
+    return;
   }
+
+  activeTimeline = false;
+  runT0 = Date.now();
+  oscPhase1 = oscPhase2 = 0;   // clean centered start, matching the server
+  if (mode==='chaos') resetChaos();
   try {
     await fetch(`${BASE}/api/osc/start`,{
       method:'POST', headers:{'Content-Type':'application/json'},
       body:JSON.stringify(buildParams()), signal:AbortSignal.timeout(4000),
     });
   } catch(e){ console.warn(e); }
-
-  startTimelinePush();
-  if (activeTimeline) localStorage.setItem(TL_SESSION_KEY, String(runT0));  // survive refresh
 }
 
 // Push interpolated timeline params to the server every tick (slider-driven
@@ -1785,6 +1815,7 @@ function scheduleUpdate() {
 
 // ── Safety (camera proximity cutoff) ─────────────────────────────────────────
 let safetyTripY = 0.55, safetyBelow = true, safetyDragging = false;
+let ignoreBox = null, ignoreDrag = null;   // presence ignore box [x0,y0,x1,y1]
 let safetyCfgTimer = null;
 
 // Reload the camera stream (cache-busted). The MJPEG <img> dies silently when
@@ -1854,6 +1885,10 @@ function applySafetyState(s, full) {
       ge('saf-delay-v').textContent = (+s.resume_delay).toFixed(1) + ' s';
     }
     if (s.presence_enabled !== undefined) ge('tog-presence').classList.toggle('on', s.presence_enabled);
+    if (!ignoreDrag && s.ignore !== undefined) {
+      if (s.ignore) { ignoreBox = s.ignore; ge('tog-ignore').classList.add('on'); }
+      else ge('tog-ignore').classList.remove('on');
+    }
     if (s.idle_timeout !== undefined) {
       ge('saf-idle').value = s.idle_timeout;
       ge('saf-idle-v').textContent = Math.round(s.idle_timeout) + ' s';
@@ -1867,12 +1902,31 @@ function applySafetyState(s, full) {
 }
 
 function renderSafetyOverlay() {
+  const ib = ge('ovl-ignore'), ihd = ge('ovl-ignore-hd');
+  const igOn = ge('tog-ignore') && ge('tog-ignore').classList.contains('on') && ignoreBox;
+  if (ib) {
+    ib.style.display = igOn ? '' : 'none';
+    ihd.style.display = igOn ? '' : 'none';
+    if (igOn) {
+      const [x0, y0, x1, y1] = ignoreBox;
+      ib.setAttribute('x', x0*100); ib.setAttribute('y', y0*100);
+      ib.setAttribute('width', (x1-x0)*100); ib.setAttribute('height', (y1-y0)*100);
+      ihd.setAttribute('x', x1*100-3.5); ihd.setAttribute('y', y1*100-4.5);
+    }
+  }
   const y = safetyTripY * 100;
   ge('ovl-line').setAttribute('y1', y); ge('ovl-line').setAttribute('y2', y);
   ge('ovl-grab').setAttribute('y', Math.max(0, y - 4));
   const d = ge('ovl-danger');
   if (safetyBelow) { d.setAttribute('y', y); d.setAttribute('height', 100 - y); }
   else             { d.setAttribute('y', 0); d.setAttribute('height', y); }
+}
+
+function toggleIgnore() {
+  if (ge('tog-ignore').classList.contains('on') && !ignoreBox)
+    ignoreBox = [0.03, 0.03, 0.28, 0.33];   // starter box, drag it to your corner
+  renderSafetyOverlay();
+  pushSafetyConfig();
 }
 
 function pushSafetyConfig() {
@@ -1888,6 +1942,7 @@ function pushSafetyConfig() {
         auto_resume: ge('tog-resume').classList.contains('on'),
         resume_delay: +ge('saf-delay').value,
         arm_on_boot: ge('tog-armboot').classList.contains('on'),
+        ignore: (ge('tog-ignore').classList.contains('on') && ignoreBox) ? ignoreBox : null,
         presence_enabled: ge('tog-presence').classList.contains('on'),
         presence_thresh: +ge('saf-motion').value,
         idle_timeout: +ge('saf-idle').value,
@@ -1903,11 +1958,41 @@ function pushSafetyConfig() {
     const cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
     return Math.max(0.05, Math.min(0.95, cy / r.height));
   };
-  const move = e => { if (!safetyDragging) return; safetyTripY = yFromEvent(e); renderSafetyOverlay(); pushSafetyConfig(); e.preventDefault(); };
-  const up   = () => { safetyDragging = false; };
+  const ptFromEvent = e => {
+    const r = svg.getBoundingClientRect();
+    return [(e.clientX - r.left) / r.width, (e.clientY - r.top) / r.height];
+  };
+  const move = e => {
+    if (ignoreDrag && ignoreBox) {
+      const [px, py] = ptFromEvent(e);
+      if (ignoreDrag.mode === 'move') {
+        const x0 = Math.max(0, Math.min(1 - ignoreDrag.w, px - ignoreDrag.dx));
+        const y0 = Math.max(0, Math.min(1 - ignoreDrag.h, py - ignoreDrag.dy));
+        ignoreBox = [x0, y0, x0 + ignoreDrag.w, y0 + ignoreDrag.h];
+      } else {
+        ignoreBox = [ignoreBox[0], ignoreBox[1],
+                     Math.max(ignoreBox[0] + 0.05, Math.min(1, px)),
+                     Math.max(ignoreBox[1] + 0.05, Math.min(1, py))];
+      }
+      renderSafetyOverlay(); pushSafetyConfig(); e.preventDefault(); return;
+    }
+    if (!safetyDragging) return; safetyTripY = yFromEvent(e); renderSafetyOverlay(); pushSafetyConfig(); e.preventDefault();
+  };
+  const up   = () => { safetyDragging = false; ignoreDrag = null; };
   const down = e => { safetyDragging = true; safetyTripY = yFromEvent(e); renderSafetyOverlay(); pushSafetyConfig(); };
   ge('ovl-grab').addEventListener('pointerdown', down);
   ge('ovl-line').addEventListener('pointerdown', down);
+  ge('ovl-ignore').addEventListener('pointerdown', e => {
+    if (!ignoreBox) return;
+    const [px, py] = ptFromEvent(e);
+    ignoreDrag = {mode: 'move', dx: px - ignoreBox[0], dy: py - ignoreBox[1],
+                  w: ignoreBox[2] - ignoreBox[0], h: ignoreBox[3] - ignoreBox[1]};
+    e.stopPropagation(); e.preventDefault();
+  });
+  ge('ovl-ignore-hd').addEventListener('pointerdown', e => {
+    ignoreDrag = {mode: 'resize'};
+    e.stopPropagation(); e.preventDefault();
+  });
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
 })();
