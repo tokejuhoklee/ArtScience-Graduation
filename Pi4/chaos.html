@@ -443,6 +443,9 @@ canvas{width:100%;border-radius:6px;background:#04040a;border:1px solid #0e0e18;
       <div id="saf-cv-warn" style="display:none;font-size:9px;color:#fc6c6c;margin-top:4px">
         OpenCV not available on the Pi4 — detection cannot run.
       </div>
+      <div style="font-size:9px;color:#4a4a6a;margin-top:4px">
+        power: <span id="saf-power">–</span>
+      </div>
     </div>
   </div><!-- /panel-safety -->
 
@@ -916,6 +919,12 @@ function connectWS() {
           }
         }
         if (d.safety !== undefined) applySafetyState(d.safety, false);
+        if (d.power) {
+          const p = d.power, el = ge('saf-power');
+          el.textContent = `${p.uv_now ? 'UNDER-VOLTAGE' : 'ok'} · ${p.temp}°C` +
+            ` · ${p.uv_events} sag${p.uv_events===1?'':'s'} · ${p.uv_s}s total`;
+          el.style.color = p.uv_now ? '#fc4c4c' : '#4a4a6a';
+        }
       } catch {}
     };
   } catch { setDot('dot-ws', false); }
@@ -1815,8 +1824,8 @@ async function loadShowLog() {
       `active ${hm(d.active_s)} (${d.pct}% of open hours) · ${d.runs} activation${d.runs===1?'':'s'}` +
       ` · longest ${hm(d.longest_s)}${d.running ? ' · running now' : ''}`;
     ge('showlog-list').innerHTML = (d.events || []).slice().reverse().map(e =>
-      `<div>${(e.t||'').slice(5,16)} — <span style="color:${e.ev==='start'?'#3ccc7c':e.ev==='boot'?'#7c5cfc':'#9c9cc0'}">${e.ev}</span>` +
-      `${e.why ? ` (${e.why})` : ''}${e.ran_s ? ` · ran ${hm(e.ran_s)}` : ''}</div>`).join('')
+      `<div>${(e.t||'').slice(5,16)} — <span style="color:${e.ev==='start'?'#3ccc7c':e.ev==='boot'?'#7c5cfc':e.ev==='undervolt'?'#fc4c4c':'#9c9cc0'}">${e.ev}</span>` +
+      `${e.why ? ` (${e.why})` : ''}${e.ran_s ? ` · ran ${hm(e.ran_s)}` : ''}${e.dur_s ? ` · ${hm(e.dur_s)}` : ''}</div>`).join('')
       || '<div>no events yet</div>';
   } catch {}
 }

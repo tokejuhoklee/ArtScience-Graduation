@@ -17,6 +17,8 @@ import math
 import os
 import serial
 import serial.tools.list_ports
+import shutil
+import subprocess
 import time
 import glob
 from pathlib import Path
@@ -229,6 +231,64 @@ class ShowLog:
 
 show_log = ShowLog()
 
+# ── Power monitor ─────────────────────────────────────────────────────────────
+# Samples the Pi firmware throttle word every 5s. Under-voltage episodes are
+# logged to the show log with durations, so sags can be correlated with motor
+# activity (clustered around runs = motor transients; constant = static drop,
+# i.e. cable losses or buck trim). Live state goes out over the WS broadcast.
+class PowerMonitor:
+    def __init__(self):
+        self.available  = shutil.which("vcgencmd") is not None
+        self.uv_now     = False
+        self.throttled  = False
+        self.temp       = 0.0
+        self.uv_events  = 0
+        self.uv_total_s = 0.0
+        self._uv_start  = None
+
+    def _sample(self):
+        out  = subprocess.check_output(["vcgencmd", "get_throttled"],
+                                       text=True, timeout=3)
+        word = int(out.strip().split("=")[1], 16)
+        out  = subprocess.check_output(["vcgencmd", "measure_temp"],
+                                       text=True, timeout=3)
+        temp = float(out.split("=")[1].split("'")[0])
+        return word, temp
+
+    def _loop(self):
+        while True:
+            try:
+                word, temp = self._sample()
+                self.temp      = temp
+                self.throttled = bool(word & 0x4)
+                uv             = bool(word & 0x1)
+                if uv and not self.uv_now:
+                    self._uv_start = time.time()
+                    self.uv_events += 1
+                    show_log.log("undervolt")
+                elif not uv and self.uv_now and self._uv_start is not None:
+                    dur = round(time.time() - self._uv_start, 1)
+                    self.uv_total_s += dur
+                    self._uv_start = None
+                    show_log.log("power ok", dur_s=dur)
+                self.uv_now = uv
+            except Exception:
+                pass
+            time.sleep(5)
+
+    def start(self):
+        if self.available:
+            threading.Thread(target=self._loop, daemon=True).start()
+
+    def state(self):
+        cur = (time.time() - self._uv_start) if (self.uv_now and self._uv_start) else 0.0
+        return {"ok": self.available, "uv_now": self.uv_now,
+                "throttled": self.throttled, "temp": round(self.temp, 1),
+                "uv_events": self.uv_events,
+                "uv_s": round(self.uv_total_s + cur)}
+
+power_mon = PowerMonitor()
+
 class SafetyMonitor:
     STALE_S = 1.0   # no fresh frame this long while armed -> trip
 
@@ -272,6 +332,7 @@ class SafetyMonitor:
         self.presence_hold    = False  # manual stop: don't auto-start while the
                                        # operator is in the room; clears once the
                                        # room empties (or presence is re-toggled)
+        self._hold_sticky     = False  # manual OFF (maintenance): never auto-clears
         self._lock         = threading.Lock()
         self._load()
 
@@ -287,6 +348,7 @@ class SafetyMonitor:
             if "presence_enabled" in d:
                 self.presence_enabled = bool(d["presence_enabled"])
                 self.presence_hold = False   # toggling re-arms autonomy
+                self._hold_sticky = False
             if "presence_thresh" in d:  self.presence_thresh = max(0.002, min(0.3, float(d["presence_thresh"])))
             if "idle_timeout" in d:     self.idle_timeout = max(5.0, min(900.0, float(d["idle_timeout"])))
             if any(k in d for k in ("trip_y", "danger_below", "exclude")):
@@ -449,11 +511,13 @@ class SafetyMonitor:
                 self.presence_state = "playing"
         else:
             if self.presence_hold:
-                # Manually stopped with people (the operator) still in the room:
-                # stay quiet. Autonomy resumes once the room has emptied.
-                if now - self.last_activity_t > self.idle_timeout:
+                # Soft hold (manual Stop): autonomy resumes once the room has
+                # emptied. Sticky hold (manual OFF — e.g. untangling the whip):
+                # NEVER auto-clears; only Run or the presence toggle re-arms it.
+                if not self._hold_sticky and now - self.last_activity_t > self.idle_timeout:
                     self.presence_hold = False
-                self.presence_state = "held (manual stop)"
+                self.presence_state = ("held (manual OFF)" if self._hold_sticky
+                                       else "held (manual stop)")
                 return
             # Debounce: only consider starting once the engine has been idle
             # a full second — restart gaps must not read as "show ended".
@@ -1138,6 +1202,7 @@ async def broadcast_loop():
                        if osc_engine.tl_active else None),
             },
             "safety": safety.state(),
+            "power": power_mon.state(),
             "serial": serial_mgr.connected,
         })
         dead = set()
@@ -1366,6 +1431,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(safety.state())
             return
 
+        if path == "/api/power":
+            self.send_json(power_mon.state())
+            return
+
         if path == "/api/showlog":
             # Activity summary (?h=24): events + how much of the exhibition's
             # OPEN HOURS (10:00-20:00 local) the show was running. Timestamps
@@ -1448,6 +1517,8 @@ class Handler(BaseHTTPRequestHandler):
                                               "right", "neutral", "move", "offset",
                                               "cw", "ccw", "calibrate"):
                     safety.presence_hold = True
+                    if cmd.lower().split()[0] in ("off", "reset"):
+                        safety._hold_sticky = True   # maintenance: stay off
                 # stop/off/reset must also kill the sequence engine,
                 # otherwise it immediately re-issues movement commands
                 if cmd.lower() in ("stop", "off", "reset"):
@@ -1503,6 +1574,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/osc/start":
             safety.presence_hold = False   # manual run: autonomy continues after
+            safety._hold_sticky = False
             osc_engine.start(data, _event_loop)
             self.send_json({"ok": True})
             return
@@ -1599,6 +1671,7 @@ async def main():
     _event_loop = asyncio.get_event_loop()
 
     show_log.log("boot")   # restarts are context for gaps in the journal
+    power_mon.start()
     serial_mgr.connect()
 
     # Auto-start a named sequence on boot (if it exists)
