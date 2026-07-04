@@ -186,6 +186,13 @@ class CameraManager:
 
 camera_mgr = CameraManager()
 
+# Stream takeover: the newest /stream viewer wins. Older streaming threads
+# notice the generation bump and close — multiple tabs/devices no longer
+# fight over tunnel bandwidth, and "which tab has the video" is always the
+# most recently opened one.
+_stream_gen  = 0
+_stream_lock = threading.Lock()
+
 # ── Safety monitor (camera proximity cutoff) ──────────────────────────────────
 # Watches a "danger zone" (one side of a horizontal trip line) on the raw,
 # grayscale camera frame and stops the whip if anything intrudes. Static
@@ -1409,16 +1416,20 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/stream":
+            global _stream_gen
             if not CAMERA_AVAILABLE or not camera_mgr.running:
                 self.send_json({"error": "camera not available"}, 503)
                 return
+            with _stream_lock:
+                _stream_gen += 1
+                my_gen = _stream_gen
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Access-Control-Allow-Origin", "*")
                 self.end_headers()
-                while True:
+                while _stream_gen == my_gen:   # a newer viewer takes over
                     frame = camera_mgr.get_frame()
                     if frame:
                         self.wfile.write(

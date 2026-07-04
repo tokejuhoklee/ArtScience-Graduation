@@ -1829,6 +1829,11 @@ document.addEventListener('DOMContentLoaded', () => {
   const cam = ge('safety-cam');
   if (cam) cam.addEventListener('error', () => setTimeout(bumpCamera, 2000));
 });
+// Newest-viewer-wins: the server hands the stream to the most recent
+// connection, so re-grab it whenever this tab becomes the one being looked at.
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) bumpCamera();
+});
 
 function openSafety() {
   const cam = ge('safety-cam');
